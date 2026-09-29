@@ -18,9 +18,10 @@ still works:
     call(app, endpoint, args?)    run one endpoint
     trace(app, note?)             capture a debug trace and save the zip here
 
-`app` may be omitted when only one is running. The bearer token comes from
-~/.config/debugtrace/token, the same file bas passes to the app at launch, so
-no agent needs a header configured. Standard library only.
+`app` may be omitted when only one is running. Each launch has its own bearer
+token, which bas passes to the app and keeps in the session record (mode 600),
+so no agent needs a header configured; ~/.config/debugtrace/token is only a
+fallback for servers started some other way. Standard library only.
 """
 
 import base64
@@ -151,6 +152,7 @@ def live_sessions():
 
 
 def describe(session):
+    # Never the token.
     return {key: session.get(key) for key in ("appName", "bundleId", "device", "url", "startedAt", "consoleLog")}
 
 
@@ -194,7 +196,7 @@ def token():
 def request(session, path, body=None):
     url = session["url"].rstrip("/") + path
     headers = {"Accept": "application/json"}
-    value = token()
+    value = session.get("token") or token()
     if value:
         headers["Authorization"] = f"Bearer {value}"
     data = None
