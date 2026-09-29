@@ -226,3 +226,20 @@ import Testing
         #expect(request.query == ["text": "hello world", "sum": "1+1", "name x": "a"])
     }
 }
+
+@MainActor @Suite struct PortConflictTests {
+    @Test func aTakenPortFailsWithAHintInsteadOfMoving() async throws {
+        let first = DebugTraceServer(surface: DebugSurface(), configuration: .init(port: 0, binding: .loopback, authentication: .none))
+        let port = try await first.start()
+        defer { first.stop() }
+        let second = DebugTraceServer(surface: DebugSurface(), configuration: .init(port: port, binding: .loopback, authentication: .none))
+        do {
+            _ = try await second.start()
+            second.stop()
+            Issue.record("a second server bound the same port")
+        } catch let error as DebugError {
+            #expect(error.hint?.contains("registry") == true)
+        }
+        #expect(!second.isRunning)
+    }
+}

@@ -56,8 +56,12 @@ public final class DebugTraceServer {
         /// which a user's installed app must not expose by accident.
         public var allowedInRelease: Bool
 
-        /// Port 0 picks a free one; read it back from `start()`.
-        public init(port: UInt16 = 8642, binding: Binding = .network, authentication: Authentication = .credential,
+        /// `port` has no default, on purpose: every app has its own fixed
+        /// port from the registry in this package's CLAUDE.md, because the MCP
+        /// entries in each agent are fixed URLs (`http://avp:<port>/mcp`). A
+        /// shared default would put two apps on one port. Port 0 picks a free
+        /// one (tests); read it back from `start()`.
+        public init(port: UInt16, binding: Binding = .network, authentication: Authentication = .credential,
                     maxBodyBytes: Int = 1 << 20, redactsResponses: Bool = true, allowedInRelease: Bool = false) {
             self.port = port
             self.binding = binding
@@ -81,7 +85,7 @@ public final class DebugTraceServer {
     private let queue = DispatchQueue(label: "DebugTraceServer")
     private lazy var mcp = MCPHandler(server: self)
 
-    public init(surface: DebugSurface = .shared, configuration: Configuration = Configuration(),
+    public init(surface: DebugSurface = .shared, configuration: Configuration,
 ) {
         self.surface = surface
         self.configuration = configuration
@@ -164,6 +168,14 @@ public final class DebugTraceServer {
         } catch {
             listener.cancel()
             self.listener = nil
+            // Deliberately no fallback to the next free port: the agents' MCP
+            // entries are fixed URLs, so a moved server would leave this app's
+            // entry pointing at whichever app holds its port.
+            if case NWError.posix(.EADDRINUSE) = error {
+                log.error("failed to start: port \(configuration.port, privacy: .public) is already in use, most likely by another app's debug server. Each app needs its own port (registry: DebugTrace/CLAUDE.md)")
+                throw DebugError(.unavailable, "port \(configuration.port) is already in use",
+                                 hint: "another app's debug server holds it; give each app its own port from the registry in DebugTrace/CLAUDE.md")
+            }
             log.error("failed to start: \(String(describing: error), privacy: .public)")
             throw error
         }

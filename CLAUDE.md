@@ -160,9 +160,30 @@ variables, both honoured in development mode only:
 
 The script then reads the port from the server's `listening on port N` line and reaches it
 through the CoreDevice tunnel address (`devicectl device info details` →
-`tunnelIPAddress`). It writes the URL and a `claude mcp add` command to
-`build/debug-server.txt`. `--log-all` mirrors the whole unified log instead. Keep the
+`tunnelIPAddress`). It tries the device's tailnet name first (the device name lowercased,
+`avp`), which is stable. It writes the URL to `build/debug-server.txt`, and says whether the
+MCP entry is already registered. `--log-all` mirrors the whole unified log instead. Keep the
 startup line's wording and the marker string: the script depends on both.
+
+## Ports and the agents' MCP entries
+
+Each app's server has **its own fixed port**. The MCP entries are registered once, at Claude
+Code user scope (`claude mcp add -s user --transport http <name> http://avp:<port>/mcp`).
+`~/.agents/bin/agents-sync` copies them to Codex and Copilot, so every agent on the Mac has
+every app as a tool, and a fixed URL keeps working across launches and rebuilds.
+
+That's why `Configuration(port:)` has no default, and why a taken port fails with a hint
+instead of moving to the next free one. A moved server would leave its app's MCP entry
+pointing at a different app. (`initialize` names the app in `serverInfo`, so a misroute is
+visible, but nothing should rely on noticing.) An entry for an app that isn't running just
+shows as failed in that agent until the app is up.
+
+| Port | App | MCP name |
+|---|---|---|
+| 8642 | Oneiros | `oneiros` |
+| 8643 | spatial-ai-character | `character` |
+
+Take the next free number for a new app, add it here, and register its entry the same way.
 
 When adding an endpoint, mark it `releaseSafe` only if its data has no personal content:
 versions, counts, modes, health, error states. File names, URLs, account names, message
