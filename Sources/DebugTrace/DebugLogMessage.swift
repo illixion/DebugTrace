@@ -123,6 +123,16 @@ public struct DebugLogMessage: Sendable, ExpressibleByStringInterpolation {
             append(value ? "true" : "false", privacy.resolved(scalar: true))
         }
 
+        /// An error prints as `Domain code: description`. The domain and
+        /// code are code-defined, so they stay public and survive into
+        /// exported traces; `privacy` applies to the description, which often
+        /// embeds URLs, paths or server text.
+        public mutating func appendInterpolation(_ error: some Error, privacy: DebugLogPrivacy = .auto) {
+            let bridged = error as NSError
+            appendText("\(bridged.domain) \(bridged.code): ")
+            append(bridged.localizedDescription, privacy.resolved(scalar: false))
+        }
+
         /// An optional prints its value, or `nil` — not `Optional(...)`.
         public mutating func appendInterpolation<T>(_ value: T?, privacy: DebugLogPrivacy = .auto) {
             guard let value else {

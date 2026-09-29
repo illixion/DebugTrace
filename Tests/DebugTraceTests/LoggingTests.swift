@@ -29,6 +29,19 @@ import Testing
         #expect(message.redacted == "1.235 2")
     }
 
+    @Test func errorsKeepDomainAndCodePublic() {
+        let error: any Error = NSError(domain: NSURLErrorDomain, code: -1001,
+                                       userInfo: [NSLocalizedDescriptionKey: "timed out loading https://home.example/api"])
+        let message: DebugLogMessage = "load failed: \(error)"
+        #expect(message.redacted == "load failed: NSURLErrorDomain -1001: <private>")
+        #expect(message.revealed.contains("home.example"))
+        let shown: DebugLogMessage = "\(error, privacy: .public)"
+        #expect(shown.redacted.hasSuffix("https://home.example/api"))
+        struct Local: Error {}
+        let local: DebugLogMessage = "\(Local())"
+        #expect(local.redacted.hasPrefix("DebugTraceTests.DebugLogMessageTests"))
+    }
+
     @Test func sensitiveIsNeverRevealed() {
         let secret = "hunter2"
         let message: DebugLogMessage = "pw \(secret, privacy: .sensitive)"
