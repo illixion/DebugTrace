@@ -1,0 +1,157 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+**DebugTrace**: one registry of debug endpoints per app, read by three consumers:
+
+- **the debug trace**: a zip of logs, feature breadcrumbs, a snapshot of every traced
+  query, and device info. It is shared from a sheet or uploaded to the app store server.
+- **the HTTP server**, used by `curl`.
+- **the MCP endpoint**, which gives an agent every endpoint as a tool.
+
+An app registers an endpoint once and it shows up in all three. That is the whole design.
+
+Three products:
+
+| Product | What | Links |
+|---|---|---|
+| `DebugTrace` | `DebugSurface` registry, trace builder, log reader, breadcrumbs, redactor, credential | nothing |
+| `DebugTraceUI` | `DebugTraceView` / `DebugTraceButton` (capture → review → share/upload) | SwiftUI |
+| `DebugTraceServer` | `DebugTraceServer`: HTTP + MCP over a surface | Network |
+
+The server is its own product so a submission build can leave it **unlinked**. The old
+compile-flag strip (`ONEIROS_NO_DEBUG_SERVER`) removed the routes but still shipped the
+transport, because SwiftPM cannot link a product per configuration.
+
+## Why it is not a RAVE target
+
+`~/Projects/CLAUDE.md` fixes the RAVE family at two packages. This package is a deliberate
+exception, decided with the user on 2026-09-29, for three reasons:
+
+- **Deployment floor.** RAVESDK's platforms are iOS 26 and up, and SwiftPM floors are
+  package-wide. The web-yt-dlp player and RegentChat target iOS 18 and are meant to adopt
+  this package.
+- **It is tooling, not app SDK.** It is the app-side half of the build-and-sign / appstore
+  infrastructure, which is slated to be open-sourced separately.
+- **It replaces RAVEEngine's `RAVEDebugServer` outright** (no compatibility shim; the user
+  pushes all repos together, so there is no public desync).
+
+It depends on neither RAVE package, and neither depends on it. A RAVE target that wants to
+contribute state (for example RAVEConsole's system monitor, or RAVEDiagnostics' metrics) does
+it from the app, by registering an endpoint.
+
+## Build and test
+
+```bash
+swift test                                   # macOS host; ~8 s (OSLogStore reads are slow on macOS)
+swift test --filter DebugTraceServerTests    # one suite
+
+# Device SDKs. -sdk is required: without it xcodebuild prints BUILD SUCCEEDED and compiles nothing
+xcodebuild -scheme DebugTrace-Package -sdk xros      -destination 'generic/platform=visionOS' build
+xcodebuild -scheme DebugTrace-Package -sdk iphoneos  -destination 'generic/platform=iOS' build
+xcodebuild -scheme DebugTrace-Package -sdk appletvos -destination 'generic/platform=tvOS' build
+```
+
+The tests use `/usr/bin/unzip` to check the zip writer, and `node` (if present) to prove the
+store's Node-side Ed25519 verify accepts what CryptoKit signs.
+
+## The API is designed for a language model reading it cold
+
+The server's main client is an LLM using `curl` or MCP. Keep these properties when adding
+anything:
+
+- **Self-describing.** `GET /` lists conventions and every endpoint, each with typed
+  parameters, defaults, ranges and a runnable `curl` line. `?endpoint=<name>` narrows it
+  to one. Help stays unauthenticated so a model can learn how to authenticate.
+- **One envelope.** A success is `{ok: true, endpoint, elapsedMs, data}`. A failure is
+  `{ok: false, error: {code, message, hint, details?}}`. **Every error needs a `hint` that
+  says what to do next.** A model retries a hintless error verbatim.
+- **Arguments are declared, validated and coerced** (`DebugParameter`). An unknown name
+  gets a "did you mean". A type, choice or range violation is a 400. Nothing is silently
+  ignored: the old servers ignored `?pos_x=` and a model saw a plausible result for a call
+  that did nothing.
+- **Queries vs commands.** Queries are GET, read-only, and marked `readOnlyHint` for MCP.
+  Commands are POST, and `destructive: true` marks `destructiveHint`. GET on a command is a
+  405 whose hint is the exact POST `curl` line.
+- **Commands return the resulting state**, not just `ok`.
+- **Naming.** Endpoint names are camelCase (`^[a-z][A-Za-z0-9]{0,47}$`, valid as MCP tool
+  names and path segments). Built-ins start with `_`. JSON keys are camelCase with the unit
+  in the name (`elapsedMs`, `footprintBytes`). No key-encoding strategy is applied, because
+  `convertToSnakeCase` also rewrites dictionary keys, which are data. Times are ISO 8601
+  UTC with milliseconds everywhere (`DebugTime.iso`).
+- **Replies are redacted by default** (`DebugRedactor.standard`). The reader's transcript
+  is a leak path too; see `~/Memory/home/feedback/redact_config_reads.md`.
+- **MCP** is JSON-RPC over streamable HTTP at `POST /mcp`, answering every request with a
+  single JSON body. It is stateless: no session id, no SSE (`GET /mcp` is a 405, which the
+  spec allows). Tool failures are `isError: true` results, so the model sees the hint.
+  Only malformed JSON-RPC gets a protocol error. Images come back as MCP image content.
+  Protocol versions supported: 2025-06-18, 2025-03-26, 2024-11-05.
+
+Built-ins every app gets: `_info`, `_logs`, `_features`, `_snapshot`, `_trace`. Traces made
+over HTTP download from `GET /_traces/<id>.zip`. `_tools` and `_call` are plain-HTTP
+spellings of MCP's `tools/list` and `tools/call`.
+
+## Security model
+
+- **Token.** `Authentication.credential` (the default) uses the bundle credential's
+  `CommandToken`. build-and-sign embeds a per-build token, and the store's ledger has it.
+  With no credential (an Xcode build) the server is open, as before.
+- **Loopback is not exempt:** on iOS, other apps on the same device can reach 127.0.0.1.
+- **Browsers are refused.** Any non-GET request carrying `Origin` gets a 403, so a web page
+  can't POST commands through the user's browser. No CORS headers are sent. The old server
+  sent `Access-Control-Allow-Origin: *`, which let any page read state.
+- **Binding.** `.network` prohibits cellular. `.loopback` is loopback only.
+
+## The trace
+
+The layout is documented in `DebugTraceBuilder` and in the `README.md` written into every
+zip. Signing:
+
+- `manifest.json` lists the SHA-256 of every other file.
+- `manifest.sig` is a raw 64-byte Ed25519 signature over manifest.json's exact bytes.
+- The signature travels inside the zip, so a file shared by AirDrop and later dropped into
+  the store verifies the same way as a direct upload.
+
+A verifier must reject any file not listed in the manifest.
+
+**Wire formats that other repos depend on**, so change them only together with those repos:
+
+- `DebugTraceCredential.plist` (`Version`, `KeyID`, `SigningKey`, `UploadURL`,
+  `CommandToken`) is written by `~/bin/build-and-sign`.
+- `format: "debugtrace/1"`, the manifest keys and `manifest.sig` are verified by the
+  appstore server (`~/Projects/appstore/server.js`).
+- The upload is a POST of the zip body, `Content-Type: application/zip`, with
+  `X-DebugTrace-Id` and `X-DebugTrace-Key-Id` headers.
+
+**Limits the OS imposes, which no code here can lift:**
+
+- `OSLogStore` never returns `.debug` entries.
+- It reads only the current process. `DebugBreadcrumbs` is the one thing that persists
+  across launches, so a crash's lead-up lives there.
+- Lines logged under a subsystem missing from `DebugTraceConfiguration.subsystems` are
+  invisible. Several apps hard-code non-bundle-id subsystems, e.g. Longwave's
+  `"pro.longwave"`.
+
+## Isolation
+
+- `DebugSurface` and the server are `@MainActor`, like the servers they replace, so
+  handlers read app models race-free.
+- `DebugTrace.mark` / `begin` / `end` are **lock-guarded and synchronous**, callable from a
+  render thread or a network callback. Do not make them async or actor-isolated, for the
+  same reason as RAVEEngine's collection layer. Marks are file appends: feature-level
+  events only, never per frame.
+
+## Consumers and rollout (as of 2026-09-29)
+
+Step 1, this package, is built. Not yet done:
+
+2. Migrate Oneiros (`DebugStateServer.swift`) and spatial-ai-character
+   (`CharacterDebugServer.swift`) to `DebugTraceServer`, using `.untyped` endpoints first.
+   Delete `RAVEDebugServer` from RAVEEngine. Add a `DebugTraceButton` to RAVEConsole's
+   console view.
+3. build-and-sign writes the credential. appstore records keys and tokens per build,
+   accepts and verifies uploads, and gets a Traces view.
+4. Typed per-app providers. Raven's `LabControlServer`. The apps outside RAVE (web-yt-dlp,
+   RegentChat; worldcast needs `NSLog` → `Logger` first).
