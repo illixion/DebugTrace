@@ -249,6 +249,9 @@ public struct DebugLogger: Sendable {
         let kept = buffer.append(level: level, subsystem: subsystem, category: category, message: message)
         let text = kept.redacted
         logger.log(level: level.osLogType, "\(text, privacy: .public)")
+        if DebugLogMirror.isEnabled, level != .debug || buffer.capturesDebug {
+            DebugLogMirror.write(level: level, subsystem: subsystem, category: category, text: text)
+        }
     }
 }
 
@@ -260,6 +263,47 @@ extension DebugLogLevel {
         case .notice: .default
         case .error: .error
         case .fault: .fault
+        }
+    }
+}
+
+/// Mirrors the app's own log lines to stderr, one compact line each, when the
+/// launch environment sets `DEBUGTRACE_STDERR=1` in a development build.
+///
+/// This is for `build-and-sign --log`, which launches the app with
+/// `devicectl --console` and writes what it prints to a file that a language
+/// model reads. Mirroring the unified log instead (`OS_ACTIVITY_DT_MODE`)
+/// drowns the app's lines in Apple framework output, in a verbose format.
+/// Here it's only the app's lines, debug included, in the trace's `logs.txt`
+/// format, exported the same way: hidden values withheld and the redactor
+/// applied, since the file is read off the device. Never in release mode.
+public enum DebugLogMirror {
+    public static let environmentKey = "DEBUGTRACE_STDERR"
+
+    public static var isEnabled: Bool {
+        requested && DebugLogBuffer.shared.mode == .development
+    }
+
+    private static let requested = ProcessInfo.processInfo.environment[environmentKey] == "1"
+
+    private static let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    private static let lock = OSAllocatedUnfairLock()
+
+    static func write(level: DebugLogLevel, subsystem: String, category: String, text: String) {
+        let configuration = DebugTrace.configuration
+        let source = subsystem == configuration.subsystems.first ? category : "\(subsystem)/\(category)"
+        let message = configuration.redactor.redact(text)
+        // One write per line, under a lock, so lines from different threads
+        // never interleave mid-line.
+        lock.withLock {
+            let line = "\(formatter.string(from: Date())) \(level.letter) \(source): \(message)\n"
+            FileHandle.standardError.write(Data(line.utf8))
         }
     }
 }

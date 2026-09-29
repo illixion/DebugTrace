@@ -147,6 +147,23 @@ over the server, and the same traces are meant for App Store user support.
 - **The person sending a trace can read it first.** `DebugTraceView` opens every text file,
   and in release mode it describes the trace in end-user terms.
 
+**`build-and-sign --log`** launches the app through `devicectl --console` and writes what it
+prints to `build/device-console.log`, which an LLM reads. For an app containing DebugTrace
+(detected by the `DEBUGTRACE_STDERR` marker string in the binary), it sets two environment
+variables, both honoured in development mode only:
+
+- `DEBUGTRACE_STDERR=1`: `DebugLogMirror` writes each app line to stderr in `logs.txt`
+  format (only the app's lines, debug included, exported and redacted), in place of the
+  whole unified log.
+- `DEBUGTRACE_SERVER=1`: `DebugTraceServer.requestedAtLaunch` becomes true, and apps start
+  their server whatever their own toggle says.
+
+The script then reads the port from the server's `listening on port N` line and reaches it
+through the CoreDevice tunnel address (`devicectl device info details` →
+`tunnelIPAddress`). It writes the URL and a `claude mcp add` command to
+`build/debug-server.txt`. `--log-all` mirrors the whole unified log instead. Keep the
+startup line's wording and the marker string: the script depends on both.
+
 When adding an endpoint, mark it `releaseSafe` only if its data has no personal content:
 versions, counts, modes, health, error states. File names, URLs, account names, message
 text and locations are personal.

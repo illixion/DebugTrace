@@ -96,6 +96,14 @@ public final class DebugTraceServer {
 
     // MARK: Lifecycle
 
+    /// True when the launch environment sets `DEBUGTRACE_SERVER=1` in a
+    /// development build. `build-and-sign --log` does, so an LLM working from
+    /// the console log can also query the app live. Apps start their server
+    /// when this is set, whatever their own developer toggle says.
+    public nonisolated static var requestedAtLaunch: Bool {
+        ProcessInfo.processInfo.environment["DEBUGTRACE_SERVER"] == "1" && DebugTrace.privacy == .development
+    }
+
     /// How long a client has to finish sending its request.
     nonisolated static let requestReadTimeoutSeconds: Double = 60
 
