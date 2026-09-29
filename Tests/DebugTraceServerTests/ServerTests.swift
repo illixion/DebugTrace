@@ -216,4 +216,13 @@ import Testing
         }
         #expect(status == 413)
     }
+
+    @Test func queryDecodesPlusAsSpaceButKeepsEncodedPlus() {
+        let raw = "GET /say?text=hello+world&sum=1%2B1&name+x=a HTTP/1.1\r\nHost: h\r\n\r\n"
+        guard case .complete(let request) = HTTPParser.parse(Data(raw.utf8), maxBodyBytes: 100) else {
+            Issue.record("request not parsed")
+            return
+        }
+        #expect(request.query == ["text": "hello world", "sum": "1+1", "name x": "a"])
+    }
 }

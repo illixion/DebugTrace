@@ -88,6 +88,9 @@ public final class DebugTraceServer {
 
     // MARK: Lifecycle
 
+    /// How long a client has to finish sending its request.
+    nonisolated static let requestReadTimeoutSeconds: Double = 60
+
     /// Starts listening and returns the bound port.
     @discardableResult
     public func start() async throws -> UInt16 {
@@ -105,11 +108,16 @@ public final class DebugTraceServer {
         let queue = queue
         listener.newConnectionHandler = { [weak self] connection in
             connection.start(queue: queue)
-            // A client that connects and never finishes a request would
-            // otherwise hold the connection forever. Generous enough for
-            // `_trace`, the slowest endpoint (120 s timeout).
-            queue.asyncAfter(deadline: .now() + 180) { connection.cancel() }
+            // A client that connects and never finishes sending a request
+            // would otherwise hold the connection forever. The deadline
+            // covers only that phase: once a request is in, the endpoint's
+            // own `timeout` bounds the handler, however long it is.
+            let received = OSAllocatedUnfairLock(initialState: false)
+            queue.asyncAfter(deadline: .now() + Self.requestReadTimeoutSeconds) {
+                if !received.withLock({ $0 }) { connection.cancel() }
+            }
             Self.receive(on: connection, buffer: Data(), maxBodyBytes: maxBody) { result in
+                received.withLock { $0 = true }
                 Task { @MainActor in self?.dispatch(result, on: connection) }
             }
         }

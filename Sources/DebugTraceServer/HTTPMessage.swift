@@ -53,14 +53,26 @@ enum HTTPParser {
         let target = String(requestLine[1])
         let components = URLComponents(string: target.hasPrefix("/") ? "http://x\(target)" : target)
         var query: [String: String] = [:]
-        for item in components?.queryItems ?? [] {
+        // Form-style decoding: `+` is a space, as curl --data-urlencode, HTML
+        // forms and most clients (models included) write it. A literal plus
+        // is `%2B`. `queryItems` would decode `%2B` first and lose the
+        // distinction, so decode from the percent-encoded items.
+        for item in components?.percentEncodedQueryItems ?? [] {
+            let name = Self.formDecode(item.name)
             // A bare `?flag` has a nil value; boolean parameters read "" as true.
-            query[item.name] = item.value ?? ""
+            query[name] = item.value.map(Self.formDecode) ?? ""
         }
         let path = components?.percentEncodedPath.removingPercentEncoding ?? target
         return .complete(HTTPRequest(method: String(requestLine[0]).uppercased(),
                                      path: path.isEmpty ? "/" : path,
                                      query: query, headers: headers, body: Data(body)))
+    }
+}
+
+extension HTTPParser {
+    static func formDecode(_ raw: String) -> String {
+        let spaced = raw.replacingOccurrences(of: "+", with: " ")
+        return spaced.removingPercentEncoding ?? spaced
     }
 }
 
