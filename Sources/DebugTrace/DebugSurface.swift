@@ -255,7 +255,7 @@ public final class DebugSurface {
 
         register(.query(
             "_logs",
-            "This process's unified-log entries, newest last. Only the current run: entries from before a crash or relaunch are gone (see _features for what persists). .debug entries are never stored by the OS and cannot be read.",
+            "This process's unified-log entries, newest last. Only the current run: entries from before a crash or relaunch are gone (see _features for what persists). .debug entries are never stored by the OS and cannot be read. Each call makes the OS log daemon scan its whole archive (about 2 s, and it slows the device while it runs), so narrow with the parameters rather than calling repeatedly, and don't poll this in a loop.",
             parameters: [
                 .integer("sinceSeconds", "how far back to read", default: 300, range: 1...86_400),
                 .string("level", "minimum level", default: "info", choices: DebugLogLevel.allCases.map(\.rawValue)),

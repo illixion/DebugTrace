@@ -90,6 +90,11 @@ public struct DebugLogResult: Sendable {
 /// - Only the current process: after a crash or relaunch the previous run's
 ///   entries are unreachable. `DebugBreadcrumbs` is the persisted part.
 ///
+/// A read is expensive whatever the query: `position(date:)` is ignored and
+/// `getEntries` makes `logd` scan the whole system log archive (~1.9 s on
+/// macOS 27, charged to `logd`, not this process). Read on demand only;
+/// RAVEConsole paces its live tail by this cost for the same reason.
+///
 /// Also: anything logged under a subsystem missing from `subsystems` is
 /// invisible, and `print()` never reaches the log at all.
 public enum DebugLogReader {
