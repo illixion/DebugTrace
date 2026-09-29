@@ -14,6 +14,7 @@ import Testing
         logger.log("default level")
         logger.warning("warn \(true)")
         logger.notice("\(Optional<Int>.none) \(Optional(3))")
+        logger.info("t \(1.23456, format: .fixed(precision: 3))s \(1500.0, format: .fixed(precision: 0)) ms")
     }
 
     @Test func autoPrivacyFollowsOSLog() {
@@ -21,6 +22,11 @@ import Testing
         let message: DebugLogMessage = "n=\(42) f=\(1.5) b=\(false) s=\(text) o=\(Optional(7))"
         #expect(message.redacted == "n=42 f=1.5 b=false s=<private> o=7")
         #expect(message.revealed == "n=42 f=1.5 b=false s=hello o=7")
+    }
+
+    @Test func floatFormatMatchesOSLog() {
+        let message: DebugLogMessage = "\(1.23456, format: .fixed(precision: 3)) \(2.0, format: .fixed(precision: 0))"
+        #expect(message.redacted == "1.235 2")
     }
 
     @Test func sensitiveIsNeverRevealed() {

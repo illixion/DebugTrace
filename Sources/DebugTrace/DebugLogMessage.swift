@@ -112,6 +112,13 @@ public struct DebugLogMessage: Sendable, ExpressibleByStringInterpolation {
             append(value.description, privacy.resolved(scalar: true))
         }
 
+        /// `OSLogFloatFormatting`'s common spellings: `format: .fixed(precision: 2)`.
+        public mutating func appendInterpolation<T: BinaryFloatingPoint>(
+            _ value: T, format: DebugLogFloatFormat, privacy: DebugLogPrivacy = .auto
+        ) {
+            append(format.render(Double(value)), privacy.resolved(scalar: true))
+        }
+
         public mutating func appendInterpolation(_ value: Bool, privacy: DebugLogPrivacy = .auto) {
             append(value ? "true" : "false", privacy.resolved(scalar: true))
         }
@@ -215,6 +222,21 @@ public struct DebugLogMessage: Sendable, ExpressibleByStringInterpolation {
             case .text(let text), .withheld(let text): total + text.utf8.count
             case .hidden(let value, _): total + value.utf8.count
             }
+        }
+    }
+}
+
+/// Float formatting, spelled like `OSLogFloatFormatting`.
+public enum DebugLogFloatFormat: Sendable {
+    case fixed(precision: Int)
+    case exponential(precision: Int)
+
+    public static var fixed: DebugLogFloatFormat { .fixed(precision: 6) }
+
+    func render(_ value: Double) -> String {
+        switch self {
+        case .fixed(let precision): String(format: "%.\(max(0, precision))f", value)
+        case .exponential(let precision): String(format: "%.\(max(0, precision))e", value)
         }
     }
 }
