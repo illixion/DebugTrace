@@ -42,6 +42,13 @@ import Testing
         #expect(local.redacted.hasPrefix("DebugTraceTests.DebugLogMessageTests"))
     }
 
+    @Test func embeddedMessagesKeepTheirPrivacy() {
+        let inner: DebugLogMessage = "to \("home.example") after \(2)s"
+        let outer: DebugLogMessage = "WS \(inner) (\("ok", privacy: .public))"
+        #expect(outer.redacted == "WS to <private> after 2s (ok)")
+        #expect(outer.revealed == "WS to home.example after 2s (ok)")
+    }
+
     @Test func sensitiveIsNeverRevealed() {
         let secret = "hunter2"
         let message: DebugLogMessage = "pw \(secret, privacy: .sensitive)"

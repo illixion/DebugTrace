@@ -123,6 +123,18 @@ public struct DebugLogMessage: Sendable, ExpressibleByStringInterpolation {
             append(value ? "true" : "false", privacy.resolved(scalar: true))
         }
 
+        /// Embeds another message with each of its values' privacy intact,
+        /// for a prefix or a composed line: `log.info("WS \(message)")`.
+        public mutating func appendInterpolation(_ message: DebugLogMessage) {
+            for segment in message.segments {
+                if case .text(let text) = segment {
+                    appendText(text)
+                } else {
+                    segments.append(segment)
+                }
+            }
+        }
+
         /// An error prints as `Domain code: description`. The domain and
         /// code are code-defined, so they stay public and survive into
         /// exported traces; `privacy` applies to the description, which often
