@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import os
 
 /// Who the app's own diagnostics are for, which decides what is kept.
@@ -294,8 +295,12 @@ public enum DebugLogMirror {
     }()
 
     private static let lock = OSAllocatedUnfairLock()
+    /// The console stream can close while the app is still importing clips.
+    /// Without this, writing to its pipe delivers SIGPIPE and aborts logging.
+    private static let safeStderr: Bool = fcntl(STDERR_FILENO, F_SETNOSIGPIPE, 1) == 0
 
     static func write(level: DebugLogLevel, subsystem: String, category: String, text: String) {
+        guard safeStderr else { return }
         let configuration = DebugTrace.configuration
         let source = subsystem == configuration.subsystems.first ? category : "\(subsystem)/\(category)"
         let message = configuration.redactor.redact(text)
@@ -303,7 +308,10 @@ public enum DebugLogMirror {
         // never interleave mid-line.
         lock.withLock {
             let line = "\(formatter.string(from: Date())) \(level.letter) \(source): \(message)\n"
-            FileHandle.standardError.write(Data(line.utf8))
+            // A closed console pipe is a normal end to the stream. The
+            // throwing API reports EPIPE; the old write(Data) raised an
+            // Objective-C exception and terminated the app.
+            try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
         }
     }
 }
