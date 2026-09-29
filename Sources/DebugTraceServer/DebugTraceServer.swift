@@ -74,16 +74,19 @@ public final class DebugTraceServer {
     public var isRunning: Bool { listener != nil }
 
     let token: String?
-    let log: (@Sendable (String) -> Void)?
+    /// Lifecycle lines go to the app's log like any other, with the port
+    /// public and the device's addresses private.
+    private let log: DebugLogger
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "DebugTraceServer")
     private lazy var mcp = MCPHandler(server: self)
 
     public init(surface: DebugSurface = .shared, configuration: Configuration = Configuration(),
-                log: (@Sendable (String) -> Void)? = nil) {
+) {
         self.surface = surface
         self.configuration = configuration
-        self.log = log
+        self.log = DebugLogger(subsystem: DebugTrace.configuration.subsystems.first ?? "DebugTrace",
+                               category: "DebugServer")
         switch configuration.authentication {
         case .credential: token = DebugTrace.credential?.commandToken
         case .token(let value): token = value
@@ -148,12 +151,12 @@ public final class DebugTraceServer {
             }
             port = bound
             let auth = token == nil ? "no token" : "bearer token required"
-            log?("DebugTraceServer: listening on port \(bound) (\(auth)) — \(Self.localAddresses().joined(separator: ", "))")
+            log.notice("listening on port \(bound, privacy: .public) (\(auth, privacy: .public)) — \(Self.localAddresses().joined(separator: ", "))")
             return bound
         } catch {
             listener.cancel()
             self.listener = nil
-            log?("DebugTraceServer: failed to start: \(error)")
+            log.error("failed to start: \(String(describing: error), privacy: .public)")
             throw error
         }
     }
