@@ -9,8 +9,8 @@ things use them:
   upload it. Builds from `build-and-sign` sign it with a per-build Ed25519 key.
 - **An HTTP server** you can query with `curl`. It documents itself at `GET /`, validates
   every argument, and returns one JSON envelope with hints on every error.
-- **An MCP endpoint** (`POST /mcp`), so an agent gets every endpoint as a tool:
-  `claude mcp add --transport http myapp http://<device>:<port>/mcp`.
+- **An MCP endpoint** (`POST /mcp`), so an agent gets every endpoint as a tool. On the Mac,
+  `Tools/debugtrace-mcp` gives every agent one entry for all running apps.
 
 ```swift
 import DebugTrace
@@ -31,8 +31,7 @@ DebugSurface.shared.register([
 
 DebugTrace.begin("world.streaming", "seed 42")        // feature breadcrumbs, any thread
 
-let server = DebugTraceServer(configuration: .init(port: 8650))   // one fixed port per app
-try await server.start()
+DebugTraceServer.startIfRequested()                  // only when launched by `bas --mcp`
 ```
 
 ```swift

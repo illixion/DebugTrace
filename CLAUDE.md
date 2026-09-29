@@ -148,42 +148,44 @@ over the server, and the same traces are meant for App Store user support.
   and in release mode it describes the trace in end-user terms.
 
 **`build-and-sign --log`** launches the app through `devicectl --console` and writes what it
-prints to `build/device-console.log`, which an LLM reads. For an app containing DebugTrace
-(detected by the `DEBUGTRACE_STDERR` marker string in the binary), it sets two environment
-variables, both honoured in development mode only:
+prints to `build/device-console.log`, which an LLM reads. When the app contains DebugTrace
+(the script greps the binary for the `DEBUGTRACE_STDERR` marker), it sets
+`DEBUGTRACE_STDERR=1`. `DebugLogMirror` then writes each app line to stderr in `logs.txt`
+format: only the app's lines, debug included, exported and redacted, in place of the whole
+unified log. `--log-all` mirrors the whole unified log instead.
 
-- `DEBUGTRACE_STDERR=1`: `DebugLogMirror` writes each app line to stderr in `logs.txt`
-  format (only the app's lines, debug included, exported and redacted), in place of the
-  whole unified log.
-- `DEBUGTRACE_SERVER=1`: `DebugTraceServer.requestedAtLaunch` becomes true, and apps start
-  their server whatever their own toggle says.
+## The debug server runs only when asked for: `bas --mcp`
 
-The script then reads the port from the server's `listening on port N` line and reaches it
-through the CoreDevice tunnel address (`devicectl device info details` →
-`tunnelIPAddress`). It tries the device's tailnet name first (the device name lowercased,
-`avp`), which is stable. It writes the URL to `build/debug-server.txt`, and says whether the
-MCP entry is already registered. `--log-all` mirrors the whole unified log instead. Keep the
-startup line's wording and the marker string: the script depends on both.
+Every app links `DebugTraceServer` and calls `DebugTraceServer.startIfRequested()` once at
+launch. The server starts only when the launch environment has `DEBUGTRACE_SERVER=1`, in a
+development build, and only `build-and-sign --mcp` sets that. Every other launch, including
+a relaunch from the home screen, runs no server, so MCP use is explicit. There are no in-app
+toggles.
 
-## Ports and the agents' MCP entries
+- **Ports are not identities.** The server takes the first free port in 8642–8691, so several
+  apps can serve at once. Nothing maps ports to apps.
+- **The registry is on the Mac, next to the pid files.** `bas --mcp` implies `--log`. The
+  `devicectl --console` process it starts exits when the app does, so its pid is the
+  session's liveness. After launch, `bas` reads the port from the server's
+  `listening on port N` line and finds a reachable host: the device name lowercased first,
+  which is its tailnet name (`avp`), then the CoreDevice tunnel address. It records the
+  session in `~/.local/state/debugtrace/sessions/<bundle id>@<device>.json` with that pid.
+- **One MCP entry for every agent.** `apps` runs `Tools/debugtrace-mcp`, a stdio server with no
+  dependencies. It is registered at Claude Code user scope, and `agents-sync` copies it to
+  Codex and Copilot. It reads the sessions on every call, drops those whose pid is gone, and
+  checks `_info` so a reused port can't misroute. Its four tools never change: `apps`,
+  `help`, `call` and `trace`. So an agent session that started before the app launched still
+  works.
+- **Auth needs no agent configuration.** `bas` keeps one token in
+  `~/.config/debugtrace/token` (mode 600) and passes it as `DEBUGTRACE_TOKEN`.
+  `Authentication.automatic` requires it, and `debugtrace-mcp` reads the same file.
+- **App Store review sees nothing.** Nobody can set a launch environment on a store build,
+  and `start()` refuses in release mode anyway. The Local Network prompt (binding a listener)
+  therefore appears only in `bas --mcp` launches, and every app still needs
+  `NSLocalNetworkUsageDescription` for those.
 
-Each app's server has **its own fixed port**. The MCP entries are registered once, at Claude
-Code user scope (`claude mcp add -s user --transport http <name> http://avp:<port>/mcp`).
-`~/.agents/bin/agents-sync` copies them to Codex and Copilot, so every agent on the Mac has
-every app as a tool, and a fixed URL keeps working across launches and rebuilds.
-
-That's why `Configuration(port:)` has no default, and why a taken port fails with a hint
-instead of moving to the next free one. A moved server would leave its app's MCP entry
-pointing at a different app. (`initialize` names the app in `serverInfo`, so a misroute is
-visible, but nothing should rely on noticing.) An entry for an app that isn't running just
-shows as failed in that agent until the app is up.
-
-| Port | App | MCP name |
-|---|---|---|
-| 8642 | Oneiros | `oneiros` |
-| 8643 | spatial-ai-character | `character` |
-
-Take the next free number for a new app, add it here, and register its entry the same way.
+Keep the `listening on port N` wording and both marker strings (`DEBUGTRACE_STDERR`,
+`DEBUGTRACE_SERVER`): the script depends on them.
 
 When adding an endpoint, mark it `releaseSafe` only if its data has no personal content:
 versions, counts, modes, health, error states. File names, URLs, account names, message

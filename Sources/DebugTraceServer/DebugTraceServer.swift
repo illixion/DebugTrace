@@ -37,14 +37,20 @@ public final class DebugTraceServer {
     }
 
     public enum Authentication: Sendable {
-        /// The bundle credential's `CommandToken` when present, else open.
-        case credential
+        /// The token `build-and-sign --mcp` passes at launch
+        /// (`DEBUGTRACE_TOKEN`), else the bundle credential's `CommandToken`,
+        /// else open.
+        case automatic
         case token(String)
         case none
     }
 
     public struct Configuration: Sendable {
-        public var port: UInt16
+        /// Tried in order until one binds, so several apps can serve at once.
+        /// Clients never need to know which port an app got: `bas --mcp` reads
+        /// it from the "listening on port N" line and records it with the
+        /// session, and the Mac-side `apps` MCP server routes by app name.
+        public var ports: ClosedRange<UInt16>
         public var binding: Binding
         public var authentication: Authentication
         public var maxBodyBytes: Int
@@ -52,18 +58,18 @@ public final class DebugTraceServer {
         /// transcript is a leak path too.
         public var redactsResponses: Bool
         /// Whether `start()` may run in release privacy mode (App Store and
-        /// TestFlight builds). Off: a debug server reads and drives app state,
-        /// which a user's installed app must not expose by accident.
+        /// TestFlight builds). Off: the server only ever starts from a
+        /// development launch, and this keeps it that way even if a caller
+        /// forgets to check.
         public var allowedInRelease: Bool
 
-        /// `port` has no default, on purpose: every app has its own fixed
-        /// port from the registry in this package's CLAUDE.md, because the MCP
-        /// entries in each agent are fixed URLs (`http://avp:<port>/mcp`). A
-        /// shared default would put two apps on one port. Port 0 picks a free
-        /// one (tests); read it back from `start()`.
-        public init(port: UInt16, binding: Binding = .network, authentication: Authentication = .credential,
-                    maxBodyBytes: Int = 1 << 20, redactsResponses: Bool = true, allowedInRelease: Bool = false) {
-            self.port = port
+        public static let defaultPorts: ClosedRange<UInt16> = 8642...8691
+
+        /// `ports: 0...0` picks any free port (tests); read it back from `start()`.
+        public init(ports: ClosedRange<UInt16> = Configuration.defaultPorts, binding: Binding = .network,
+                    authentication: Authentication = .automatic, maxBodyBytes: Int = 1 << 20,
+                    redactsResponses: Bool = true, allowedInRelease: Bool = false) {
+            self.ports = ports
             self.binding = binding
             self.authentication = authentication
             self.maxBodyBytes = maxBodyBytes
@@ -85,14 +91,15 @@ public final class DebugTraceServer {
     private let queue = DispatchQueue(label: "DebugTraceServer")
     private lazy var mcp = MCPHandler(server: self)
 
-    public init(surface: DebugSurface = .shared, configuration: Configuration,
-) {
+    public init(surface: DebugSurface = .shared, configuration: Configuration = Configuration()) {
         self.surface = surface
         self.configuration = configuration
         self.log = DebugLogger(subsystem: DebugTrace.configuration.subsystems.first ?? "DebugTrace",
                                category: "DebugServer")
         switch configuration.authentication {
-        case .credential: token = DebugTrace.credential?.commandToken
+        case .automatic:
+            token = ProcessInfo.processInfo.environment["DEBUGTRACE_TOKEN"].flatMap { $0.isEmpty ? nil : $0 }
+                ?? DebugTrace.credential?.commandToken
         case .token(let value): token = value
         case .none: token = nil
         }
@@ -101,17 +108,31 @@ public final class DebugTraceServer {
     // MARK: Lifecycle
 
     /// True when the launch environment sets `DEBUGTRACE_SERVER=1` in a
-    /// development build. `build-and-sign --log` does, so an LLM working from
-    /// the console log can also query the app live. Apps start their server
-    /// when this is set, whatever their own developer toggle says.
+    /// development build. Only `build-and-sign --mcp` does: the server is off
+    /// in every other launch, so MCP use is always explicit.
     public nonisolated static var requestedAtLaunch: Bool {
         ProcessInfo.processInfo.environment["DEBUGTRACE_SERVER"] == "1" && DebugTrace.privacy == .development
+    }
+
+    /// The server `startIfRequested()` started, if any.
+    public private(set) static var shared: DebugTraceServer?
+
+    /// Call once at launch, after `DebugTrace.configure`. Starts a server over
+    /// `DebugSurface.shared` when this launch asked for one
+    /// (`requestedAtLaunch`), and does nothing otherwise. Endpoints can be
+    /// registered before or after: the server reads the surface per request.
+    public static func startIfRequested() {
+        guard requestedAtLaunch, shared == nil else { return }
+        let server = DebugTraceServer()
+        shared = server
+        server.startInBackground()
     }
 
     /// How long a client has to finish sending its request.
     nonisolated static let requestReadTimeoutSeconds: Double = 60
 
-    /// Starts listening and returns the bound port.
+    /// Starts listening on the first free port in `configuration.ports` and
+    /// returns it.
     @discardableResult
     public func start() async throws -> UInt16 {
         if let port, listener != nil { return port }
@@ -119,13 +140,36 @@ public final class DebugTraceServer {
             throw DebugError(.forbidden, "the debug server does not run in release builds",
                              hint: "set Configuration.allowedInRelease, or capture a trace from the app instead")
         }
+        for candidate in configuration.ports {
+            do {
+                let bound = try await listen(on: candidate)
+                port = bound
+                let auth = token == nil ? "no token" : "bearer token required"
+                log.notice("listening on port \(bound, privacy: .public) (\(auth, privacy: .public)) — \(Self.localAddresses().joined(separator: ", "))")
+                return bound
+            } catch NWError.posix(.EADDRINUSE) {
+                continue
+            } catch {
+                log.error("failed to start: \(String(describing: error), privacy: .public)")
+                throw error
+            }
+        }
+        let range = "\(configuration.ports.lowerBound)-\(configuration.ports.upperBound)"
+        log.error("failed to start: every port in \(range, privacy: .public) is in use")
+        throw DebugError(.unavailable, "every port in \(range) is in use",
+                         hint: "other apps' debug servers hold them; stop one (each bas --mcp launch runs one)")
+    }
+
+    private func listen(on candidate: UInt16) async throws -> UInt16 {
         let parameters = NWParameters.tcp
+        // Rebinding right after a stop must not trip over connections still
+        // closing. A port another listener holds is still refused.
         parameters.allowLocalEndpointReuse = true
         switch configuration.binding {
         case .loopback: parameters.requiredInterfaceType = .loopback
         case .network: parameters.prohibitedInterfaceTypes = [.cellular]
         }
-        let requested: NWEndpoint.Port = configuration.port == 0 ? .any : (NWEndpoint.Port(rawValue: configuration.port) ?? .any)
+        let requested: NWEndpoint.Port = candidate == 0 ? .any : (NWEndpoint.Port(rawValue: candidate) ?? .any)
         let listener = try NWListener(using: parameters, on: requested)
         self.listener = listener
         let maxBody = configuration.maxBodyBytes
@@ -146,7 +190,7 @@ public final class DebugTraceServer {
             }
         }
         do {
-            let bound: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            return try await withCheckedThrowingContinuation { continuation in
                 let once = OSAllocatedUnfairLock(initialState: false)
                 listener.stateUpdateHandler = { state in
                     let outcome: Result<UInt16, any Error>?
@@ -161,22 +205,9 @@ public final class DebugTraceServer {
                 }
                 listener.start(queue: queue)
             }
-            port = bound
-            let auth = token == nil ? "no token" : "bearer token required"
-            log.notice("listening on port \(bound, privacy: .public) (\(auth, privacy: .public)) — \(Self.localAddresses().joined(separator: ", "))")
-            return bound
         } catch {
             listener.cancel()
             self.listener = nil
-            // Deliberately no fallback to the next free port: the agents' MCP
-            // entries are fixed URLs, so a moved server would leave this app's
-            // entry pointing at whichever app holds its port.
-            if case NWError.posix(.EADDRINUSE) = error {
-                log.error("failed to start: port \(configuration.port, privacy: .public) is already in use, most likely by another app's debug server. Each app needs its own port (registry: DebugTrace/CLAUDE.md)")
-                throw DebugError(.unavailable, "port \(configuration.port) is already in use",
-                                 hint: "another app's debug server holds it; give each app its own port from the registry in DebugTrace/CLAUDE.md")
-            }
-            log.error("failed to start: \(String(describing: error), privacy: .public)")
             throw error
         }
     }
@@ -399,7 +430,7 @@ public final class DebugTraceServer {
     }
 
     func baseURL(_ request: HTTPRequest) -> String {
-        "http://\(request.header("host") ?? "127.0.0.1:\(port ?? configuration.port)")"
+        "http://\(request.header("host") ?? "127.0.0.1:\(port ?? configuration.ports.lowerBound)")"
     }
 
     static func milliseconds(_ duration: Duration) -> Double {

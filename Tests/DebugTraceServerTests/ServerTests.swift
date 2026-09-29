@@ -52,7 +52,7 @@ import Testing
         surface.register(.raw("exit", kind: .command, "leave", destructive: true) { _ in
             try DebugResult.json(["exiting": true]).then { flag.value = true }
         })
-        let server = DebugTraceServer(surface: surface, configuration: .init(port: 0, binding: .loopback, authentication: .token("secret")))
+        let server = DebugTraceServer(surface: surface, configuration: .init(ports: 0...0, binding: .loopback, authentication: .token("secret")))
         let port = try await server.start()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
@@ -189,7 +189,7 @@ import Testing
     @Test func responsesAreRedacted() async throws {
         let surface = DebugSurface(includeBuiltins: false)
         surface.register(.query("config", "config") { _ in ["server": "https://u:pw@host/x", "apiKey": "k"] as JSONValue })
-        let server = DebugTraceServer(surface: surface, configuration: .init(port: 0, binding: .loopback, authentication: .none))
+        let server = DebugTraceServer(surface: surface, configuration: .init(ports: 0...0, binding: .loopback, authentication: .none))
         let port = try await server.start()
         defer { server.stop() }
         let (data, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/config")!)
@@ -227,19 +227,29 @@ import Testing
     }
 }
 
-@MainActor @Suite struct PortConflictTests {
-    @Test func aTakenPortFailsWithAHintInsteadOfMoving() async throws {
-        let first = DebugTraceServer(surface: DebugSurface(), configuration: .init(port: 0, binding: .loopback, authentication: .none))
-        let port = try await first.start()
+@MainActor @Suite struct PortSearchTests {
+    @Test func aTakenPortMovesToTheNextAndAFullRangeFailsWithAHint() async throws {
+        let first = DebugTraceServer(surface: DebugSurface(), configuration: .init(ports: 0...0, binding: .loopback, authentication: .none))
+        let taken = try await first.start()
         defer { first.stop() }
-        let second = DebugTraceServer(surface: DebugSurface(), configuration: .init(port: port, binding: .loopback, authentication: .none))
+
+        // The ports next to a fresh one are often held by client connections
+        // (ephemeral ports run sequentially), so only "somewhere later in the
+        // range" is guaranteed.
+        let second = DebugTraceServer(surface: DebugSurface(), configuration: .init(ports: taken...(taken + 20), binding: .loopback, authentication: .none))
+        let moved = try await second.start()
+        defer { second.stop() }
+        #expect(moved > taken)
+
+        let third = DebugTraceServer(surface: DebugSurface(), configuration: .init(ports: taken...taken, binding: .loopback, authentication: .none))
         do {
-            _ = try await second.start()
-            second.stop()
-            Issue.record("a second server bound the same port")
+            _ = try await third.start()
+            third.stop()
+            Issue.record("a third server bound a taken port")
         } catch let error as DebugError {
-            #expect(error.hint?.contains("registry") == true)
+            #expect(error.code == .unavailable)
+            #expect(error.hint?.contains("bas --mcp") == true)
         }
-        #expect(!second.isRunning)
+        #expect(!third.isRunning)
     }
 }

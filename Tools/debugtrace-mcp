@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""
+debugtrace-mcp: one MCP server (stdio) for every app launched with
+`build-and-sign --mcp`, so each coding agent on the Mac needs a single entry:
+
+    claude mcp add -s user apps -- ~/Projects/DebugTrace/Tools/debugtrace-mcp
+
+Apps don't have fixed ports. Each `bas --mcp` launch records a session in
+~/.local/state/debugtrace/sessions/<bundle id>@<device>.json: the app, the
+device, the URL its server bound, and the pid of the `devicectl --console`
+process streaming its log. That process exits when the app does, so a
+session whose pid is gone is over. The tools below never change, whichever
+apps are running, so an agent session that started before an app launched
+still works:
+
+    apps                          what is running
+    help(app, endpoint?)          the app's self-describing API, with schemas
+    call(app, endpoint, args?)    run one endpoint
+    trace(app, note?)             capture a debug trace and save the zip here
+
+`app` may be omitted when only one is running. The bearer token comes from
+~/.config/debugtrace/token, the same file bas passes to the app at launch, so
+no agent needs a header configured. Standard library only.
+"""
+
+import base64
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+STATE_DIR = os.path.expanduser(os.environ.get("DEBUGTRACE_STATE_DIR", "~/.local/state/debugtrace"))
+SESSIONS_DIR = os.path.join(STATE_DIR, "sessions")
+TOKEN_FILE = os.path.expanduser(os.environ.get("DEBUGTRACE_TOKEN_FILE", "~/.config/debugtrace/token"))
+PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
+CALL_TIMEOUT_SECONDS = 200
+
+INSTRUCTIONS = (
+    "Debug servers of the user's apps, running on their devices. Only apps launched with "
+    "`build-and-sign --mcp` appear. Call `apps` to see what is running, `help` to read an app's "
+    "endpoints (typed parameters, defaults, ranges), then `call`. Queries only read; commands change "
+    "app state. Every error carries a hint saying what to do next. Values the app logs as private "
+    "show as <private>; don't try to work around that."
+)
+
+TOOLS = [
+    {
+        "name": "apps",
+        "description": "Apps currently running with their debug server (launched with `build-and-sign --mcp`): name, bundle id, device, URL, when launched, and the console log file. Start here.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "help",
+        "description": "An app's self-describing API: every endpoint with its kind (query or command), typed parameters, defaults and ranges, and conventions. Pass `endpoint` for just one.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "endpoint": {"type": "string", "description": "one endpoint's name"},
+            },
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "call",
+        "description": "Run one endpoint of a running app and return its result. Read `help` first for the endpoint's parameters. Built-ins every app has: _info, _logs (source=app|system, level, contains, limit, sinceSeconds), _features, _snapshot. Commands change app state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "endpoint": {"type": "string", "description": "endpoint name, e.g. _info or state"},
+                "arguments": {"type": "object", "description": "the endpoint's arguments, by name"},
+            },
+            "required": ["endpoint"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "trace",
+        "description": "Capture a debug trace (logs, feature breadcrumbs, a snapshot of every traced query, device info; signed when the build carries a key) and save the zip on this Mac. Returns its path and file list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "note": {"type": "string", "description": "what was being investigated; stored as note.txt"},
+                "logMinutes": {"type": "integer", "minimum": 1, "maximum": 1440, "description": "minutes of log history to include (default 30)"},
+            },
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+]
+
+
+class ToolError(Exception):
+    """A failure the model should see, with what to do about it."""
+
+    def __init__(self, message, hint=None):
+        super().__init__(message)
+        self.message = message
+        self.hint = hint
+
+    def text(self):
+        return self.message + (f"\nhint: {self.hint}" if self.hint else "")
+
+
+# MARK: sessions
+
+def pid_is_console_streamer(pid):
+    try:
+        os.kill(pid, 0)
+    except (OSError, TypeError):
+        return False
+    try:
+        command = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "devicectl" in command
+
+
+def live_sessions():
+    sessions = []
+    try:
+        names = sorted(os.listdir(SESSIONS_DIR))
+    except FileNotFoundError:
+        return sessions
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(SESSIONS_DIR, name)
+        try:
+            with open(path) as handle:
+                session = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if pid_is_console_streamer(session.get("pid")):
+            session["_path"] = path
+            sessions.append(session)
+        else:
+            # The app ended (its console stream exited): the session is over.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return sessions
+
+
+def describe(session):
+    return {key: session.get(key) for key in ("appName", "bundleId", "device", "url", "startedAt", "consoleLog")}
+
+
+def resolve(app):
+    sessions = live_sessions()
+    if not sessions:
+        raise ToolError("no app is running with its debug server",
+                        "launch one with `build-and-sign --mcp` (from the app's repo), then call `apps`")
+    if not app:
+        if len(sessions) == 1:
+            return sessions[0]
+        names = ", ".join(s.get("appName") or s.get("bundleId") for s in sessions)
+        raise ToolError(f"{len(sessions)} apps are running ({names})", "pass `app` with one of those names")
+    wanted = app.strip().lower()
+
+    def keys(session):
+        bundle = (session.get("bundleId") or "").lower()
+        return {bundle, (session.get("appName") or "").lower(), bundle.rsplit(".", 1)[-1]}
+
+    exact = [s for s in sessions if wanted in keys(s)]
+    matches = exact or [s for s in sessions if any(wanted in key for key in keys(s) if key)]
+    if len(matches) == 1:
+        return matches[0]
+    names = ", ".join(s.get("appName") or s.get("bundleId") for s in (matches or sessions))
+    if matches:
+        raise ToolError(f"'{app}' matches several running apps ({names})", "pass the full bundle id")
+    raise ToolError(f"no running app matches '{app}'", f"running now: {names}; call `apps` for details")
+
+
+# MARK: HTTP
+
+def token():
+    try:
+        with open(TOKEN_FILE) as handle:
+            value = handle.read().strip()
+            return value or None
+    except OSError:
+        return None
+
+
+def request(session, path, body=None):
+    url = session["url"].rstrip("/") + path
+    headers = {"Accept": "application/json"}
+    value = token()
+    if value:
+        headers["Authorization"] = f"Bearer {value}"
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if body is not None else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=CALL_TIMEOUT_SECONDS) as response:
+            return response.status, response.headers.get("Content-Type", ""), response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.headers.get("Content-Type", ""), error.read()
+    except (urllib.error.URLError, OSError) as error:
+        raise ToolError(f"{session.get('appName')} did not answer at {session['url']}: {getattr(error, 'reason', error)}",
+                        "the app may be suspended or the device asleep; bring it to the foreground, or relaunch with `build-and-sign --mcp`")
+
+
+_verified = set()
+
+
+def verified(session):
+    """The session file says which app is on this port; make sure it still is."""
+    key = (session["url"], session.get("startedAt"))
+    if key in _verified:
+        return session
+    status, _, raw = request(session, "/_info")
+    try:
+        info = json.loads(raw)
+    except ValueError:
+        info = {}
+    bundle = ((info.get("data") or {}).get("app") or {}).get("bundleId")
+    if status == 401:
+        raise ToolError(f"{session.get('appName')} refused the token", "relaunch it with `build-and-sign --mcp`, which passes the current one")
+    if bundle and bundle != session.get("bundleId"):
+        raise ToolError(f"{session['url']} is now served by {bundle}, not {session.get('bundleId')}",
+                        "relaunch the app with `build-and-sign --mcp` to refresh its session")
+    _verified.add(key)
+    return session
+
+
+# MARK: tools
+
+def text_result(value, is_error=False):
+    text = value if isinstance(value, str) else json.dumps(value, indent=2, ensure_ascii=False)
+    result = {"content": [{"type": "text", "text": text}]}
+    if is_error:
+        result["isError"] = True
+    return result
+
+
+def save_file(session, relative, data):
+    root = session.get("projectRoot") or os.path.expanduser("~/Downloads")
+    path = os.path.join(root, "build", "debugtrace", relative)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return path
+
+
+def tool_apps(_):
+    sessions = live_sessions()
+    if not sessions:
+        return text_result({"apps": [], "hint": "launch an app with `build-and-sign --mcp` to make it appear here"})
+    return text_result({"apps": [describe(s) for s in sessions]})
+
+
+def tool_help(arguments):
+    session = verified(resolve(arguments.get("app")))
+    endpoint = arguments.get("endpoint")
+    path = "/" + (f"?endpoint={urllib.request.quote(endpoint)}" if endpoint else "")
+    status, _, raw = request(session, path)
+    return text_result(raw.decode("utf-8", "replace"), is_error=status >= 400)
+
+
+def tool_call(arguments):
+    session = verified(resolve(arguments.get("app")))
+    endpoint = arguments.get("endpoint")
+    if not endpoint:
+        raise ToolError("`endpoint` is required", "call `help` to list the app's endpoints")
+    status, content_type, raw = request(session, "/_call", {"name": endpoint, "arguments": arguments.get("arguments") or {}})
+    if content_type.startswith("application/json"):
+        return text_result(raw.decode("utf-8", "replace"), is_error=status >= 400)
+    if content_type.startswith("image/"):
+        return {"content": [{"type": "image", "data": base64.b64encode(raw).decode(), "mimeType": content_type.split(";")[0]}]}
+    extension = content_type.split("/")[-1].split(";")[0] or "bin"
+    path = save_file(session, f"{endpoint}.{extension}", raw)
+    return text_result({"ok": True, "endpoint": endpoint, "savedTo": path, "contentType": content_type, "bytes": len(raw)})
+
+
+def tool_trace(arguments):
+    session = verified(resolve(arguments.get("app")))
+    call_arguments = {k: arguments[k] for k in ("note", "logMinutes") if k in arguments}
+    status, _, raw = request(session, "/_call", {"name": "_trace", "arguments": call_arguments})
+    try:
+        reply = json.loads(raw)
+    except ValueError:
+        return text_result(raw.decode("utf-8", "replace"), is_error=True)
+    if status >= 400 or not reply.get("ok"):
+        return text_result(reply, is_error=True)
+    data = reply["data"]
+    status, _, archive = request(session, data["download"])
+    if status >= 400:
+        return text_result(archive.decode("utf-8", "replace"), is_error=True)
+    path = save_file(session, os.path.join("traces", data["filename"]), archive)
+    return text_result({"savedTo": path, "traceId": data["traceId"], "signed": data["signed"], "bytes": len(archive),
+                        "files": [f["path"] for f in data.get("files", [])]})
+
+
+HANDLERS = {"apps": tool_apps, "help": tool_help, "call": tool_call, "trace": tool_trace}
+
+
+# MARK: JSON-RPC over stdio
+
+def handle(message):
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id is None:
+        return None  # a notification
+    if method == "initialize":
+        asked = (message.get("params") or {}).get("protocolVersion")
+        version = asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
+        result = {"protocolVersion": version, "capabilities": {"tools": {}},
+                  "serverInfo": {"name": "debugtrace-apps", "version": "1"}, "instructions": INSTRUCTIONS}
+    elif method == "ping":
+        result = {}
+    elif method == "tools/list":
+        result = {"tools": TOOLS}
+    elif method == "tools/call":
+        params = message.get("params") or {}
+        handler = HANDLERS.get(params.get("name"))
+        if handler is None:
+            return {"jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32602, "message": f"unknown tool {params.get('name')!r}; tools: {', '.join(HANDLERS)}"}}
+        try:
+            result = handler(params.get("arguments") or {})
+        except ToolError as error:
+            result = text_result(error.text(), is_error=True)
+        except Exception as error:  # never take the agent's MCP connection down
+            result = text_result(f"internal error: {error}", is_error=True)
+    else:
+        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"method not found: {method}"}}
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
+        else:
+            response = handle(message) if isinstance(message, dict) else \
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "batches are not supported"}}
+        if response is not None:
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
