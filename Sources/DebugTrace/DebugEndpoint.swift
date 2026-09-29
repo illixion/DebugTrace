@@ -36,6 +36,11 @@ public struct DebugEndpoint: Sendable {
     /// ask before calling these.
     public let destructive: Bool
     public let trace: TracePolicy
+    /// Whether a trace captures this endpoint in release mode, where traces
+    /// come from real users. Off by default: say yes only for data with no
+    /// personal content — versions, counts, modes, health, error states.
+    /// Development traces ignore it.
+    public let releaseSafe: Bool
     public let timeout: Duration
     let handler: Handler
 
@@ -47,9 +52,11 @@ public struct DebugEndpoint: Sendable {
         version: Int = 1,
         destructive: Bool = false,
         trace: TracePolicy = .automatic,
+        releaseSafe: Bool = false,
         timeout: Duration = .seconds(30),
         handler: @escaping Handler
     ) {
+        self.releaseSafe = releaseSafe
         self.name = name
         self.kind = kind
         self.description = description
@@ -101,11 +108,12 @@ extension DebugEndpoint {
         parameters: [DebugParameter] = [],
         version: Int = 1,
         trace: TracePolicy = .automatic,
+        releaseSafe: Bool = false,
         timeout: Duration = .seconds(30),
         handler: @escaping @MainActor @Sendable (DebugArguments) async throws -> Output
     ) -> DebugEndpoint {
         DebugEndpoint(name: name, kind: .query, description: description, parameters: parameters,
-                      version: version, trace: trace, timeout: timeout) { arguments in
+                      version: version, trace: trace, releaseSafe: releaseSafe, timeout: timeout) { arguments in
             try DebugResult.json(try await handler(arguments))
         }
     }
@@ -140,12 +148,13 @@ extension DebugEndpoint {
         version: Int = 1,
         destructive: Bool = false,
         trace: TracePolicy = .automatic,
+        releaseSafe: Bool = false,
         timeout: Duration = .seconds(30),
         handler: @escaping Handler
     ) -> DebugEndpoint {
         DebugEndpoint(name: name, kind: kind, description: description, parameters: parameters,
-                      version: version, destructive: destructive, trace: trace, timeout: timeout,
-                      handler: handler)
+                      version: version, destructive: destructive, trace: trace, releaseSafe: releaseSafe,
+                      timeout: timeout, handler: handler)
     }
 
     /// The migration path for route tables written against the old
@@ -159,11 +168,13 @@ extension DebugEndpoint {
         parameters: [DebugParameter] = [],
         destructive: Bool = false,
         trace: TracePolicy = .automatic,
+        releaseSafe: Bool = false,
         timeout: Duration = .seconds(30),
         handler: @escaping @MainActor @Sendable (DebugArguments) async throws -> [String: Any]
     ) -> DebugEndpoint {
         DebugEndpoint(name: name, kind: kind, description: description, parameters: parameters,
-                      destructive: destructive, trace: trace, timeout: timeout) { arguments in
+                      destructive: destructive, trace: trace, releaseSafe: releaseSafe,
+                      timeout: timeout) { arguments in
             DebugResult(body: .json(JSONValue(any: try await handler(arguments))))
         }
     }

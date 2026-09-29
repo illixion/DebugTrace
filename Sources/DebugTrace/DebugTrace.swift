@@ -2,10 +2,22 @@ import Foundation
 import os
 
 public struct DebugTraceConfiguration: Sendable {
-    /// Log subsystems a trace and `_logs` read. The first is the app's own.
-    /// Add any subsystem the app or its packages log under that is not the
-    /// bundle identifier — those lines are otherwise invisible.
+    /// The app's own log subsystems, the first being the primary one. Lines
+    /// from `DebugLogger` are captured whatever their subsystem; this list
+    /// only decides which subsystem is shown without a prefix, and which the
+    /// unified-log reader treats as the app's.
     public var subsystems: [String]
+    /// See `DebugPrivacyMode`. Detected from how the app was installed
+    /// unless set.
+    public var privacy: DebugPrivacyMode
+    /// Whether `.debug` lines are kept in the buffer. Nil: on in development,
+    /// off in release.
+    public var capturesDebug: Bool?
+    /// Whether a trace also carries the unified log (every subsystem in the
+    /// process: Apple frameworks, packages still on `os.Logger`). Nil: in
+    /// development only. It costs a multi-second `logd` scan per trace, and
+    /// framework lines can carry user data the app never chose to log.
+    public var includesSystemLog: Bool?
     /// How much log history a trace includes.
     public var logWindowSeconds: Int
     public var maxLogEntries: Int
@@ -13,15 +25,23 @@ public struct DebugTraceConfiguration: Sendable {
 
     public init(
         subsystems: [String]? = nil,
+        privacy: DebugPrivacyMode = .detected,
+        capturesDebug: Bool? = nil,
+        includesSystemLog: Bool? = nil,
         logWindowSeconds: Int = 30 * 60,
         maxLogEntries: Int = 20_000,
         redactor: DebugRedactor = .standard
     ) {
         self.subsystems = subsystems ?? [Bundle.main.bundleIdentifier].compactMap { $0 }
+        self.privacy = privacy
+        self.capturesDebug = capturesDebug
+        self.includesSystemLog = includesSystemLog
         self.logWindowSeconds = logWindowSeconds
         self.maxLogEntries = maxLogEntries
         self.redactor = redactor
     }
+
+    var resolvedIncludesSystemLog: Bool { includesSystemLog ?? (privacy == .development) }
 }
 
 /// Entry points: configure once at launch, mark features as they are used,
@@ -47,7 +67,11 @@ public enum DebugTrace {
 
     public static func configure(_ configuration: DebugTraceConfiguration) {
         state.withLock { $0.configuration = configuration }
+        DebugLogBuffer.shared.mode = configuration.privacy
+        DebugLogBuffer.shared.capturesDebug = configuration.capturesDebug ?? (configuration.privacy == .development)
     }
+
+    public static var privacy: DebugPrivacyMode { configuration.privacy }
 
     /// The bundle's embedded credential, if build-and-sign put one there.
     public static var credential: DebugTraceCredential? {
@@ -73,16 +97,25 @@ public enum DebugTrace {
     }()
 
     /// Records a feature-level event. Callable from any thread.
-    public static func mark(_ event: String, _ detail: String? = nil) {
-        breadcrumbs.mark(event, detail)
+    ///
+    /// Breadcrumbs are written to disk and survive relaunches, so the detail
+    /// is stored as exports show it: values not marked `.public` are
+    /// withheld before the write, in both privacy modes. Event names are code
+    /// identifiers (`world.streaming`), never user data.
+    public static func mark(_ event: String, _ detail: DebugLogMessage? = nil) {
+        breadcrumbs.mark(event, detail.map(storedDetail))
     }
 
-    public static func begin(_ feature: String, _ detail: String? = nil) {
-        breadcrumbs.begin(feature, detail)
+    public static func begin(_ feature: String, _ detail: DebugLogMessage? = nil) {
+        breadcrumbs.begin(feature, detail.map(storedDetail))
     }
 
-    public static func end(_ feature: String, _ detail: String? = nil) {
-        breadcrumbs.end(feature, detail)
+    public static func end(_ feature: String, _ detail: DebugLogMessage? = nil) {
+        breadcrumbs.end(feature, detail.map(storedDetail))
+    }
+
+    private static func storedDetail(_ detail: DebugLogMessage) -> String {
+        configuration.redactor.redact(detail.redacted)
     }
 
     // MARK: Capture
@@ -104,7 +137,7 @@ public enum DebugTrace {
         if recentArchives.count > DebugTraceBuilder.keptArchives {
             recentArchives.removeFirst(recentArchives.count - DebugTraceBuilder.keptArchives)
         }
-        mark("_trace.captured", archive.id)
+        mark("_trace.captured", "\(archive.id, privacy: .public)")
         return archive
     }
 
@@ -134,7 +167,7 @@ public enum DebugTrace {
         let (data, response) = try await URLSession.shared.upload(for: request, fromFile: archive.url)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let body = (try? JSONValue.parse(data)) ?? (data.isEmpty ? nil : .string(String(decoding: data.prefix(2_000), as: UTF8.self)))
-        mark("_trace.uploaded", "\(archive.id) → \(status)")
+        mark("_trace.uploaded", "\(archive.id, privacy: .public) → \(status)")
         return DebugTraceUploadResult(statusCode: status, accepted: (200..<300).contains(status), response: body)
     }
 }

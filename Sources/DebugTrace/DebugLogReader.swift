@@ -81,33 +81,65 @@ public struct DebugLogResult: Sendable {
     public var truncated: Bool { matched > entries.count }
 }
 
-/// Reads this process's unified-log entries.
+/// Reads log lines: the app's own from `DebugLogBuffer`, everything else
+/// from the unified log.
 ///
-/// Two limits come from the OS and no code here can lift them:
-/// - `.debug` entries are never stored, so they cannot be read back. Log at
-///   `.info` or above what should reach a trace (RAVEConsole's
-///   `effectiveDebugLevel` promotes while a console is open, not otherwise).
+/// **The buffer** (`buffered`) holds every `DebugLogger` line, debug
+/// included, for the whole session up to its caps. Reading it is cheap.
+///
+/// **The unified log** (`read`) is for lines the app doesn't control:
+/// Apple frameworks and code still on `os.Logger`. The OS imposes limits no
+/// code here can lift:
+/// - `.debug` entries are never stored, and `.info` ones only in memory,
+///   where the system drops them within minutes.
 /// - Only the current process: after a crash or relaunch the previous run's
 ///   entries are unreachable. `DebugBreadcrumbs` is the persisted part.
+/// - A read is expensive whatever the query: `position(date:)` is ignored
+///   and `getEntries` makes `logd` scan the whole system log archive
+///   (~1.9 s on macOS 27, charged to `logd`, not this process). Read on
+///   demand only, never on a timer.
 ///
-/// A read is expensive whatever the query: `position(date:)` is ignored and
-/// `getEntries` makes `logd` scan the whole system log archive (~1.9 s on
-/// macOS 27, charged to `logd`, not this process). Read on demand only;
-/// RAVEConsole paces its live tail by this cost for the same reason.
-///
-/// Also: anything logged under a subsystem missing from `subsystems` is
-/// invisible, and `print()` never reaches the log at all.
+/// Both run every returned message through the redactor, and `contains`
+/// matches the redacted text, so a search can't be used to probe for a
+/// value the redactor hides.
 public enum DebugLogReader {
+    public static func buffered(_ query: DebugLogQuery, buffer: DebugLogBuffer = .shared,
+                                redactor: DebugRedactor) -> DebugLogResult {
+        let needle = query.contains?.lowercased()
+        let limit = max(1, query.limit)
+        var kept: [DebugLogEntry] = []
+        var matched = 0
+        for record in buffer.records() {
+            guard record.date >= query.since, record.level >= query.minimumLevel else { continue }
+            if let category = query.category, record.category != category { continue }
+            if !query.subsystems.isEmpty, !query.subsystems.contains(record.subsystem) { continue }
+            let entry = record.entry(redactor: redactor)
+            if let needle, !entry.message.lowercased().contains(needle), !entry.category.lowercased().contains(needle) {
+                continue
+            }
+            matched += 1
+            kept.append(entry)
+        }
+        if kept.count > limit { kept.removeFirst(kept.count - limit) }
+        return DebugLogResult(entries: kept, matched: matched)
+    }
+
+    /// The unified log. An empty `subsystems` reads every subsystem in the
+    /// process.
     public static func read(_ query: DebugLogQuery, redactor: DebugRedactor) throws -> DebugLogResult {
         let store = try OSLogStore(scope: .currentProcessIdentifier)
         let position = store.position(date: query.since)
-        var format = "subsystem IN %@"
-        var arguments: [Any] = [query.subsystems]
+        var clauses: [String] = []
+        var arguments: [Any] = []
+        if !query.subsystems.isEmpty {
+            clauses.append("subsystem IN %@")
+            arguments.append(query.subsystems)
+        }
         if let category = query.category {
-            format += " AND category == %@"
+            clauses.append("category == %@")
             arguments.append(category)
         }
-        let predicate = NSPredicate(format: format, argumentArray: arguments)
+        let predicate = clauses.isEmpty ? nil : NSPredicate(format: clauses.joined(separator: " AND "), argumentArray: arguments)
         let needle = query.contains?.lowercased()
         let limit = max(1, query.limit)
 
@@ -116,9 +148,11 @@ public enum DebugLogReader {
         for case let entry as OSLogEntryLog in try store.getEntries(at: position, matching: predicate) {
             let level = DebugLogLevel(entry.level)
             guard level >= query.minimumLevel else { continue }
-            let message = entry.composedMessage
-            if let needle, !message.lowercased().contains(needle), !entry.category.lowercased().contains(needle) {
-                continue
+            var message = entry.composedMessage
+            if let needle {
+                // Match what the caller would be shown, not the raw text.
+                message = redactor.redact(message)
+                if !message.lowercased().contains(needle), !entry.category.lowercased().contains(needle) { continue }
             }
             matched += 1
             kept.append(DebugLogEntry(time: DebugTime.iso(entry.date), level: level,

@@ -38,7 +38,11 @@ public struct DebugTraceView: View {
             } header: {
                 Text("Note")
             } footer: {
-                Text("Includes recent logs, feature history, app state and device info. Values that look like secrets are redacted.")
+                if DebugTrace.privacy == .release {
+                    Text("A report for the developer: this app's recent activity log, the features you used, and device details such as model and OS version. Personal details the app handles are left out. You can read every file before sending.")
+                } else {
+                    Text("Includes recent logs, feature history, app state and device info. Values logged as private are withheld and values that look like secrets are redacted.")
+                }
             }
 
             Section {
@@ -74,12 +78,22 @@ public struct DebugTraceView: View {
     private func contents(_ archive: DebugTraceArchive) -> some View {
         Section {
             ForEach(archive.manifest.files, id: \.path) { file in
-                LabeledContent(file.path, value: Self.size(file.bytes))
+                if let text = archive.textFiles[file.path] {
+                    NavigationLink {
+                        DebugTraceFilePreview(path: file.path, text: text)
+                    } label: {
+                        LabeledContent(file.path, value: Self.size(file.bytes))
+                    }
+                } else {
+                    LabeledContent(file.path, value: Self.size(file.bytes))
+                }
             }
             LabeledContent("Total", value: Self.size(archive.bytes))
             LabeledContent("Signed", value: archive.manifest.signature?.keyId ?? "No — not a store build")
         } header: {
             Text("Contents")
+        } footer: {
+            Text("Tap a file to read it.")
         }
     }
 
@@ -95,7 +109,8 @@ public struct DebugTraceView: View {
                 Button {
                     Task { await send(archive) }
                 } label: {
-                    Label("Upload to App Store Server", systemImage: "icloud.and.arrow.up")
+                    Label(DebugTrace.privacy == .release ? "Send to Developer" : "Upload to App Store Server",
+                          systemImage: "icloud.and.arrow.up")
                 }
                 .disabled(isUploading)
                 uploadStatus
@@ -198,5 +213,39 @@ public struct DebugTraceButton: View {
                     }
             }
         }
+    }
+}
+
+/// One file of a trace, read-only. Long files show their end, where the
+/// newest log lines are.
+struct DebugTraceFilePreview: View {
+    let path: String
+    let text: String
+
+    private static let limit = 200_000
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                if text.utf8.count > Self.limit {
+                    Text("Showing the last \(Self.limit / 1000) KB of \(text.utf8.count / 1000) KB.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(shown)
+                    .font(.system(.caption, design: .monospaced))
+                    #if !os(tvOS)
+                    .textSelection(.enabled)
+                    #endif
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding()
+        }
+        .navigationTitle(path)
+    }
+
+    private var shown: String {
+        guard text.utf8.count > Self.limit else { return text }
+        return String(decoding: text.utf8.suffix(Self.limit), as: UTF8.self)
     }
 }

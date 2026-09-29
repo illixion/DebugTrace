@@ -42,6 +42,13 @@ public struct DebugAppInfo: Codable, Sendable {
         public let signingKeyId: String?
         public let uploadConfigured: Bool
         public let subsystems: [String]
+        /// `development` or `release` — see `DebugPrivacyMode`. In release,
+        /// private log values were never stored and traces carry only
+        /// release-safe endpoints.
+        public let privacy: DebugPrivacyMode
+        /// The in-process log buffer: how full it is, how much it has
+        /// dropped, whether debug lines are kept.
+        public let logBuffer: DebugLogBuffer.Stats
     }
 
     public let app: App
@@ -84,7 +91,9 @@ public struct DebugAppInfo: Codable, Sendable {
                 session: DebugTrace.breadcrumbs.sessionId,
                 signingKeyId: credential?.keyId,
                 uploadConfigured: credential?.uploadURL != nil,
-                subsystems: DebugTrace.configuration.subsystems),
+                subsystems: DebugTrace.configuration.subsystems,
+                privacy: DebugTrace.privacy,
+                logBuffer: DebugLogBuffer.shared.stats),
             capturedAt: DebugTime.iso(Date()))
     }
 

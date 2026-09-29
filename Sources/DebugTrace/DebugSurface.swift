@@ -195,11 +195,19 @@ public final class DebugSurface {
     /// Calls every traced query. What a trace captures and what `_snapshot`
     /// returns — the same code, so a model can check live what a trace would
     /// have recorded.
-    public func snapshot() async -> Snapshot {
+    public func snapshot(privacy: DebugPrivacyMode? = nil) async -> Snapshot {
         var providers: [String: JSONValue] = [:]
         var files: [String: Data] = [:]
+        var withheld: [String] = []
+        let privacy = privacy ?? DebugTrace.privacy
         for endpoint in catalog {
             guard let arguments = endpoint.traceArguments else { continue }
+            // A release trace comes from a real user: only what an endpoint
+            // declared free of personal data goes in.
+            if privacy == .release && !endpoint.releaseSafe {
+                withheld.append(endpoint.name)
+                continue
+            }
             let start = ContinuousClock.now
             let result = await call(endpoint.name, arguments: arguments)
             let elapsed = ContinuousClock.now - start
@@ -233,11 +241,17 @@ public final class DebugSurface {
             }
             providers[endpoint.name] = .object(entry)
         }
-        let json: JSONValue = [
+        var document: [String: JSONValue] = [
             "format": "debugsurface/1",
             "capturedAt": .string(DebugTime.iso(Date())),
+            "privacy": .string(privacy.rawValue),
             "providers": .object(providers),
         ]
+        if !withheld.isEmpty {
+            // Named, so a reader knows the data exists and why it's absent.
+            document["withheldInRelease"] = .array(withheld.map { .string($0) })
+        }
+        let json = JSONValue.object(document)
         return Snapshot(json: json, files: files)
     }
 
@@ -249,44 +263,57 @@ public final class DebugSurface {
     // MARK: Built-ins
 
     private func registerBuiltins() {
-        register(.query("_info", "App identity (bundle id, git SHA build, version), device, process health (memory footprint, thermal state, uptime) and trace configuration. Start here.") { _ in
+        register(.query("_info", "App identity (bundle id, git SHA build, version), device, process health (memory footprint, thermal state, uptime) and trace configuration, including the privacy mode and the log buffer's fill. Start here.",
+                        releaseSafe: true) { _ in
             DebugAppInfo.current()
         })
 
         register(.query(
             "_logs",
-            "This process's unified-log entries, newest last. Only the current run: entries from before a crash or relaunch are gone (see _features for what persists). .debug entries are never stored by the OS and cannot be read. Each call makes the OS log daemon scan its whole archive (about 2 s, and it slows the device while it runs), so narrow with the parameters rather than calling repeatedly, and don't poll this in a loop.",
+            "This app's log lines, newest last. source=app (default) is the app's own logging, every level including debug, for the whole run up to the buffer's cap: cheap, call it as often as needed. source=system is the OS unified log of this process (Apple frameworks, code not yet on the app's logger): development builds only, info level and up, only the last few minutes, and each call makes the OS log daemon scan its whole archive (about 2 s, and it slows the device), so don't poll it. Both are gone after a relaunch (see _features for what persists). Values the app logged as private show as <private>; secrets are redacted.",
             parameters: [
+                .string("source", "app: the app's own log buffer; system: the OS unified log (development builds only)",
+                        default: "app", choices: ["app", "system"]),
                 .integer("sinceSeconds", "how far back to read", default: 300, range: 1...86_400),
                 .string("level", "minimum level", default: "info", choices: DebugLogLevel.allCases.map(\.rawValue)),
                 .string("category", "only this logger category (exact match)"),
-                .string("contains", "only entries whose message or category contains this text (case-insensitive)"),
+                .string("contains", "only entries whose message or category contains this text (case-insensitive, matched against the redacted text)"),
                 .integer("limit", "maximum entries returned; the newest are kept", default: 200, range: 1...5_000),
                 .string("format", "lines: one compact string per entry; json: objects", default: "lines", choices: ["lines", "json"]),
             ],
             trace: .never
         ) { arguments in
             let configuration = DebugTrace.configuration
+            let system = arguments.string("source") == "system"
+            if system && configuration.privacy == .release {
+                throw DebugError(.forbidden, "the unified log is not readable in release builds",
+                                 hint: "use source=app; release builds only share the app's own, privacy-filtered log")
+            }
             let query = DebugLogQuery(
                 since: Date().addingTimeInterval(-Double(arguments.int("sinceSeconds") ?? 300)),
-                subsystems: configuration.subsystems,
+                subsystems: [],
                 minimumLevel: DebugLogLevel(rawValue: arguments.string("level") ?? "info") ?? .info,
                 category: arguments.string("category"),
                 contains: arguments.string("contains"),
                 limit: arguments.int("limit") ?? 200)
-            let result = try await Task.detached(priority: .utility) {
-                try DebugLogReader.read(query, redactor: configuration.redactor)
-            }.value
+            let result = system
+                ? try await Task.detached(priority: .utility) {
+                    try DebugLogReader.read(query, redactor: configuration.redactor)
+                }.value
+                : DebugLogReader.buffered(query, redactor: configuration.redactor)
             let primary = configuration.subsystems.first
             let entries: JSONValue = arguments.string("format") == "json"
                 ? try JSONValue(encoding: result.entries)
                 : .array(result.entries.map { .string($0.line(primarySubsystem: primary)) })
-            return DebugLogsReply(entries: entries, returned: result.entries.count, matched: result.matched,
-                                  truncated: result.truncated, subsystems: configuration.subsystems)
+            return DebugLogsReply(source: system ? "system" : "app", entries: entries,
+                                  returned: result.entries.count, matched: result.matched,
+                                  truncated: result.truncated,
+                                  buffer: system ? nil : DebugLogBuffer.shared.stats)
         })
 
         register(.query("_features", "Features in use right now, and this session's recent feature marks, newest last. The marks also persist across relaunches in a trace's breadcrumbs files.",
-                        parameters: [.integer("limit", "recent marks returned", default: 50, range: 1...500)]) { arguments in
+                        parameters: [.integer("limit", "recent marks returned", default: 50, range: 1...500)],
+                        releaseSafe: true) { arguments in
             let crumbs = DebugTrace.breadcrumbs
             return DebugFeaturesReply(session: crumbs.sessionId,
                                       sessionStartedAt: DebugTime.iso(crumbs.sessionStartedAt),
@@ -327,11 +354,14 @@ public final class DebugSurface {
 }
 
 struct DebugLogsReply: Encodable {
+    let source: String
     let entries: JSONValue
     let returned: Int
     let matched: Int
     let truncated: Bool
-    let subsystems: [String]
+    /// For source=app: fill and evictions, so a reader can tell "nothing
+    /// happened" from "it scrolled out".
+    let buffer: DebugLogBuffer.Stats?
 }
 
 struct DebugFeaturesReply: Encodable {

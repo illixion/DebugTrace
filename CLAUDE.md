@@ -17,7 +17,7 @@ Three products:
 
 | Product | What | Links |
 |---|---|---|
-| `DebugTrace` | `DebugSurface` registry, trace builder, log reader, breadcrumbs, redactor, credential | nothing |
+| `DebugTrace` | `DebugLogger` + in-process log buffer, `DebugSurface` registry, trace builder, log reader, breadcrumbs, redactor, credential | nothing |
 | `DebugTraceUI` | `DebugTraceView` / `DebugTraceButton` (capture → review → share/upload) | SwiftUI |
 | `DebugTraceServer` | `DebugTraceServer`: HTTP + MCP over a surface | Network |
 
@@ -104,6 +104,53 @@ spellings of MCP's `tools/list` and `tools/call`.
   sent `Access-Control-Allow-Origin: *`, which let any page read state.
 - **Binding.** `.network` prohibits cellular. `.loopback` is loopback only.
 
+## Logging and privacy
+
+Apps log through **`DebugLogger`**, a drop-in for `os.Logger`: the same method names and
+the same `\(value, privacy: .public)` spelling, so switching an app means changing its
+logger declarations, not its call sites. Each line goes to two places:
+
+- **`DebugLogBuffer.shared`**, an in-memory ring capped by count and bytes (default 5,000 /
+  2 MB). It holds every level including debug, for the whole run. Nothing is written to disk,
+  because the user ruled out disk persistence (SSD wear). Reading it is a lock and a copy,
+  so the console tails it live and `_logs` defaults to it.
+- **The unified log**, with hidden values already withheld, so Xcode and `log stream` still
+  see every line. Private values never reach the OS log, in either mode.
+
+`OSLogStore` is only for what the app doesn't control: Apple frameworks and packages still
+on `os.Logger`. It's read on demand only (`_logs source=system`, `system-log.txt`), because
+every read makes `logd` scan its whole archive. Polling it once a second slowed visionOS
+apps to a crawl (fixed in RAVEConsole 2026-09-29, before the buffer existed).
+
+**Privacy is the design constraint, not a filter bolted on.** Cloud LLMs read these logs
+over the server, and the same traces are meant for App Store user support.
+
+- **`privacy:` levels follow os_log.** `.auto` (the default) makes numbers and bools public
+  and everything else private. `.private` shows only on the device's own screen in
+  development mode. `.sensitive` is never stored at all. `mask: .hash` gives a short
+  HMAC under a key made fresh at each launch: equal values match within a trace, but can't
+  be joined across traces.
+- **Every export withholds hidden values, then runs `DebugRedactor`**, which catches secrets
+  a call site wrongly marked `.public`. Exports are traces, server replies, the console's
+  copy button and the OS log. `contains` searches match the redacted text, so a search
+  can't probe a hidden value.
+- **Breadcrumb details are stored redacted** (they persist on disk), and event names must
+  be code identifiers.
+- **`DebugPrivacyMode`.** `.development` keeps private values in the buffer for the local
+  console. `.release` drops them the moment they're logged and turns off debug capture by
+  default. Release traces also carry only `releaseSafe: true` endpoints (the others are
+  named in `withheldInRelease`) and no system log. `_logs source=system` is refused, and
+  `DebugTraceServer.start()` throws unless `allowedInRelease`. The mode is detected: an
+  App Store or TestFlight install (no embedded provisioning profile, or a Mac App Store
+  receipt) is release. Detection fails safe: anything not provably a development build is
+  release.
+- **The person sending a trace can read it first.** `DebugTraceView` opens every text file,
+  and in release mode it describes the trace in end-user terms.
+
+When adding an endpoint, mark it `releaseSafe` only if its data has no personal content:
+versions, counts, modes, health, error states. File names, URLs, account names, message
+text and locations are personal.
+
 ## The trace
 
 The layout is documented in `DebugTraceBuilder` and in the `README.md` written into every
@@ -125,14 +172,12 @@ A verifier must reject any file not listed in the manifest.
 - The upload is a POST of the zip body, `Content-Type: application/zip`, with
   `X-DebugTrace-Id` and `X-DebugTrace-Key-Id` headers.
 
-**Limits the OS imposes, which no code here can lift:**
+**Limits, which no code here can lift:**
 
-- `OSLogStore` never returns `.debug` entries.
-- It reads only the current process. `DebugBreadcrumbs` is the one thing that persists
-  across launches, so a crash's lead-up lives there.
-- Lines logged under a subsystem missing from `DebugTraceConfiguration.subsystems` are
-  invisible. Several apps hard-code non-bundle-id subsystems, e.g. Longwave's
-  `"pro.longwave"`.
+- The buffer and `OSLogStore` both cover only the current run. `DebugBreadcrumbs` is the one
+  thing that persists across launches, so a crash's lead-up lives there.
+- `OSLogStore` never returns `.debug` entries and loses `.info` ones within minutes. That's
+  why the app's own lines come from the buffer instead.
 
 ## Isolation
 

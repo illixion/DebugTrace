@@ -51,15 +51,20 @@ public final class DebugTraceServer {
         /// Apply the trace redactor to replies. On by default: the reader's
         /// transcript is a leak path too.
         public var redactsResponses: Bool
+        /// Whether `start()` may run in release privacy mode (App Store and
+        /// TestFlight builds). Off: a debug server reads and drives app state,
+        /// which a user's installed app must not expose by accident.
+        public var allowedInRelease: Bool
 
         /// Port 0 picks a free one; read it back from `start()`.
         public init(port: UInt16 = 8642, binding: Binding = .network, authentication: Authentication = .credential,
-                    maxBodyBytes: Int = 1 << 20, redactsResponses: Bool = true) {
+                    maxBodyBytes: Int = 1 << 20, redactsResponses: Bool = true, allowedInRelease: Bool = false) {
             self.port = port
             self.binding = binding
             self.authentication = authentication
             self.maxBodyBytes = maxBodyBytes
             self.redactsResponses = redactsResponses
+            self.allowedInRelease = allowedInRelease
         }
     }
 
@@ -95,6 +100,10 @@ public final class DebugTraceServer {
     @discardableResult
     public func start() async throws -> UInt16 {
         if let port, listener != nil { return port }
+        if DebugTrace.privacy == .release && !configuration.allowedInRelease {
+            throw DebugError(.forbidden, "the debug server does not run in release builds",
+                             hint: "set Configuration.allowedInRelease, or capture a trace from the app instead")
+        }
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         switch configuration.binding {
