@@ -138,7 +138,7 @@ public struct DebugTraceView: View {
             if result.accepted {
                 Label("Uploaded", systemImage: "checkmark.circle").foregroundStyle(.green)
             } else {
-                Text("Server refused it (HTTP \(result.statusCode))\(result.response?["error"]?["message"]?.stringValue.map { ": \($0)" } ?? "")")
+                Text("Server refused it (HTTP \(result.statusCode))\(Self.reason(result).map { ": \($0)" } ?? "")")
                     .foregroundStyle(.red)
             }
         case .failed(let message):
@@ -178,6 +178,13 @@ public struct DebugTraceView: View {
         } catch {
             upload = .failed("Upload failed: \(error.localizedDescription)")
         }
+    }
+
+    /// The store answers `{"error": "why"}`; DebugTrace's own server
+    /// `{"error": {"message": "why"}}`.
+    private static func reason(_ result: DebugTraceUploadResult) -> String? {
+        let error = result.response?["error"]
+        return error?.stringValue ?? error?["message"]?.stringValue
     }
 
     private static func size(_ bytes: Int) -> String {

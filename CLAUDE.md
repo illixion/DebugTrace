@@ -95,9 +95,10 @@ spellings of MCP's `tools/list` and `tools/call`.
 
 ## Security model
 
-- **Token.** `Authentication.credential` (the default) uses the bundle credential's
-  `CommandToken`. build-and-sign embeds a per-build token, and the store's ledger has it.
-  With no credential (an Xcode build) the server is open, as before.
+- **Token.** `Authentication.automatic` (the default) takes `DEBUGTRACE_TOKEN` from the
+  launch environment, which `bas --mcp` sets to a fresh per-launch token recorded only in
+  that session's record. A bundle credential's `CommandToken` is the fallback; build-and-sign
+  no longer writes one. With neither, the server is open.
 - **Loopback is not exempt:** on iOS, other apps on the same device can reach 127.0.0.1.
 - **Browsers are refused.** Any non-GET request carrying `Origin` gets a 403, so a web page
   can't POST commands through the user's browser. No CORS headers are sent. The old server
@@ -205,12 +206,17 @@ A verifier must reject any file not listed in the manifest.
 
 **Wire formats that other repos depend on**, so change them only together with those repos:
 
-- `DebugTraceCredential.plist` (`Version`, `KeyID`, `SigningKey`, `UploadURL`,
-  `CommandToken`) is written by `~/bin/build-and-sign`.
+- `DebugTraceCredential.plist` (`Version`, `KeyID`, `SigningKey`, `UploadURL`; optional
+  `CommandToken`) is written by `~/bin/build-and-sign` (Step 4.7) into every dev build of an
+  app that links DebugTrace, whatever the launch flags, so Upload always works. Not for
+  `--distribution`. The public half goes to the key ledger,
+  `~/.local/state/debugtrace/keys/<keyId>.json`, which the appstore verifies against.
 - `format: "debugtrace/1"`, the manifest keys and `manifest.sig` are verified by the
   appstore server (`~/Projects/appstore/server.js`).
 - The upload is a POST of the zip body, `Content-Type: application/zip`, with
-  `X-DebugTrace-Id` and `X-DebugTrace-Key-Id` headers.
+  `X-DebugTrace-Id` and `X-DebugTrace-Key-Id` headers, to `POST /api/traces`. The store
+  answers `{error: "why"}` on refusal; `DebugTraceView` shows that reason. Verified traces
+  land unpacked in `~/Projects/appstore/data/traces/<traceId>/files/`.
 
 **Limits, which no code here can lift:**
 
@@ -228,15 +234,12 @@ A verifier must reject any file not listed in the manifest.
   same reason as RAVEEngine's collection layer. Marks are file appends: feature-level
   events only, never per frame.
 
-## Consumers and rollout (as of 2026-09-29)
+## Consumers and rollout (as of 2026-10-02)
 
-Step 1, this package, is built. Not yet done:
+Done: this package; Oneiros and spatial-ai-character on `DebugTraceServer`, with
+`RAVEDebugServer` deleted and a `DebugTraceButton` in RAVEConsole; every RAVE app on
+`DebugLogger` and `startIfRequested`; build-and-sign keys, the key ledger, and the appstore's
+verified upload and Traces view. Not yet done:
 
-2. Migrate Oneiros (`DebugStateServer.swift`) and spatial-ai-character
-   (`CharacterDebugServer.swift`) to `DebugTraceServer`, using `.untyped` endpoints first.
-   Delete `RAVEDebugServer` from RAVEEngine. Add a `DebugTraceButton` to RAVEConsole's
-   console view.
-3. build-and-sign writes the credential. appstore records keys and tokens per build,
-   accepts and verifies uploads, and gets a Traces view.
 4. Typed per-app providers. Raven's `LabControlServer`. The apps outside RAVE (web-yt-dlp,
    RegentChat; worldcast needs `NSLog` → `Logger` first).
