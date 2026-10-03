@@ -289,6 +289,10 @@ public final class DebugSurface {
                 throw DebugError(.forbidden, "the unified log is not readable in release builds",
                                  hint: "use source=app; release builds only share the app's own, privacy-filtered log")
             }
+            if system && !configuration.systemLogReadable {
+                throw DebugError(.forbidden, "this app does not share the unified log",
+                                 hint: "use source=app; this app turned off includesSystemLog because framework log lines can carry personal data")
+            }
             let query = DebugLogQuery(
                 since: Date().addingTimeInterval(-Double(arguments.int("sinceSeconds") ?? 300)),
                 subsystems: [],

@@ -13,10 +13,12 @@ public struct DebugTraceConfiguration: Sendable {
     /// Whether `.debug` lines are kept in the buffer. Nil: on in development,
     /// off in release.
     public var capturesDebug: Bool?
-    /// Whether a trace also carries the unified log (every subsystem in the
-    /// process: Apple frameworks, packages still on `os.Logger`). Nil: in
-    /// development only. It costs a multi-second `logd` scan per trace, and
-    /// framework lines can carry user data the app never chose to log.
+    /// Whether the unified log (every subsystem in the process: Apple
+    /// frameworks, packages still on `os.Logger`) may leave the app, in a
+    /// trace or through `_logs source=system`. Nil: in development only. It
+    /// costs a multi-second `logd` scan per read, and framework lines can carry
+    /// user data the app never chose to log — so an app whose frameworks may
+    /// log people (a messenger's call SDK) sets this false.
     public var includesSystemLog: Bool?
     /// How much log history a trace includes.
     public var logWindowSeconds: Int
@@ -42,6 +44,10 @@ public struct DebugTraceConfiguration: Sendable {
     }
 
     var resolvedIncludesSystemLog: Bool { includesSystemLog ?? (privacy == .development) }
+
+    /// Whether `_logs source=system` answers: never in release, and not when
+    /// the app has opted out of sharing the unified log at all.
+    var systemLogReadable: Bool { privacy == .development && resolvedIncludesSystemLog }
 }
 
 /// Entry points: configure once at launch, mark features as they are used,

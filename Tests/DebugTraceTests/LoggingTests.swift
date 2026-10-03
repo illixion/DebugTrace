@@ -170,6 +170,13 @@ import Testing
         #expect(development.json["withheldInRelease"] == nil)
     }
 
+    @Test func systemLogIsReadableOnlyInDevelopmentAndWhenNotOptedOut() {
+        #expect(DebugTraceConfiguration(privacy: .development).systemLogReadable)
+        #expect(!DebugTraceConfiguration(privacy: .development, includesSystemLog: false).systemLogReadable)
+        #expect(!DebugTraceConfiguration(privacy: .release).systemLogReadable)
+        #expect(!DebugTraceConfiguration(privacy: .release, includesSystemLog: true).systemLogReadable)
+    }
+
     @Test func breadcrumbDetailsAreStoredWithoutPrivateValues() {
         let email = "erin@example.com"
         DebugTrace.mark("tests.login", "as \(email) attempt \(2)")

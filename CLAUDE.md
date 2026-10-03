@@ -145,6 +145,10 @@ over the server, and the same traces are meant for App Store user support.
   App Store or TestFlight install (no embedded provisioning profile, or a Mac App Store
   receipt) is release. Detection fails safe: anything not provably a development build is
   release.
+- **`includesSystemLog: false` keeps the unified log in the app entirely**, in development
+  too: no `system-log.txt` in traces, and `_logs source=system` is refused. Set it when a
+  linked framework may log people (RegentChat does, for LiveKit's participant and room
+  lines). The app's own `DebugLogger` lines are unaffected.
 - **The person sending a trace can read it first.** `DebugTraceView` opens every text file,
   and in release mode it describes the trace in end-user terms.
 
