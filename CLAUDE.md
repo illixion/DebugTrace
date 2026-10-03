@@ -245,5 +245,10 @@ Done: this package; Oneiros and spatial-ai-character on `DebugTraceServer`, with
 `DebugLogger` and `startIfRequested`; build-and-sign keys, the key ledger, and the appstore's
 verified upload and Traces view. Not yet done:
 
-4. Typed per-app providers. Raven's `LabControlServer`. The apps outside RAVE (web-yt-dlp,
-   RegentChat; worldcast needs `NSLog` → `Logger` first).
+4. Typed per-app providers. Raven's `LabControlServer`. The apps outside RAVE (web-yt-dlp;
+   worldcast needs `NSLog` → `Logger` first).
+
+RegentChat adopted it on 2026-10-03 under a stricter rule than the default: two read-only,
+content-free queries, `includesSystemLog: false`, the extension left unlinked, and a test
+that seeds personal values and fails if one reaches a reply. Copy that shape for any app that
+carries private messages.
