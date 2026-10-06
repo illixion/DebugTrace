@@ -114,6 +114,9 @@ public final class DebugTraceServer {
     /// public and the device's addresses private.
     private let log: DebugLogger
     private var listener: NWListener?
+    /// The port the last listener held, tried first on a restart so clients'
+    /// recorded URLs keep working.
+    private var lastPort: UInt16?
     private let queue = DispatchQueue(label: "DebugTraceServer")
     private lazy var mcp = MCPHandler(server: self)
     private lazy var approvals = DebugApprovals(mode: configuration.approval)
@@ -196,10 +199,12 @@ public final class DebugTraceServer {
             throw DebugError(.forbidden, "the debug server does not run in release builds",
                              hint: "set Configuration.allowedInRelease, or capture a trace from the app instead")
         }
-        for candidate in configuration.ports {
+        let candidates = (lastPort.map { [$0] } ?? []) + configuration.ports.filter { $0 != lastPort }
+        for candidate in candidates {
             do {
                 let bound = try await listen(on: candidate)
                 port = bound
+                lastPort = bound
                 let auth = token == nil ? "no token" : "bearer token required"
                 log.notice("listening on port \(bound, privacy: .public) (\(auth, privacy: .public)) — \(Self.localAddresses().joined(separator: ", "))")
                 return bound
@@ -255,7 +260,7 @@ public final class DebugTraceServer {
         do {
             return try await withCheckedThrowingContinuation { continuation in
                 let once = OSAllocatedUnfairLock(initialState: false)
-                listener.stateUpdateHandler = { state in
+                listener.stateUpdateHandler = { [weak self] state in
                     let outcome: Result<UInt16, any Error>?
                     switch state {
                     case .ready: outcome = .success(listener.port?.rawValue ?? 0)
@@ -263,8 +268,16 @@ public final class DebugTraceServer {
                     case .cancelled: outcome = .failure(CancellationError())
                     default: outcome = nil
                     }
-                    guard let outcome, once.withLock({ let first = !$0; $0 = true; return first }) else { return }
-                    continuation.resume(with: outcome)
+                    guard let outcome else { return }
+                    if once.withLock({ let first = !$0; $0 = true; return first }) {
+                        continuation.resume(with: outcome)
+                    } else if case .failure = outcome {
+                        // After start-up: the OS can drop a listening socket
+                        // (across a suspension, or with a failed Bonjour
+                        // registration). Without this the server kept
+                        // claiming to run on a port that refused everyone.
+                        Task { @MainActor in self?.listenerDied(listener, state) }
+                    }
                 }
                 listener.start(queue: queue)
             }
@@ -272,6 +285,22 @@ public final class DebugTraceServer {
             listener.cancel()
             self.listener = nil
             throw error
+        }
+    }
+
+    /// A running listener failed or was cancelled behind our back: log why
+    /// and listen again, on the same port if it is still free. A deliberate
+    /// `stop()` has already cleared `listener`, so it is left alone.
+    private func listenerDied(_ dead: NWListener, _ state: NWListener.State) {
+        guard listener === dead else { return }
+        log.error("listener on port \(self.port ?? 0, privacy: .public) stopped: \(String(describing: state), privacy: .public); restarting")
+        dead.cancel()
+        listener = nil
+        port = nil
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard listener == nil else { return }
+            try? await start()
         }
     }
 
