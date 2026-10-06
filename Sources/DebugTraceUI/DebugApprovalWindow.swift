@@ -114,7 +114,7 @@ public final class DebugApprovalCenter: DebugApprovalPresenting {
 /// The scene the prompts appear in. Add it to the App's body once. A single
 /// `Window`, not a `WindowGroup`, so a prompt can never open a second copy;
 /// that scene type needs visionOS 26, above this package's floor.
-@available(visionOS 26.0, macOS 13.0, *)
+@available(visionOS 26.0, macOS 15.0, *)
 public struct DebugApprovalWindow: Scene {
     public init() {}
 
@@ -123,6 +123,10 @@ public struct DebugApprovalWindow: Scene {
             DebugApprovalView()
         }
         .windowResizability(.contentSize)
+        // Only ever opened for a prompt: never at launch, and never restored
+        // as an empty "No request is waiting" window.
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
     }
 }
 

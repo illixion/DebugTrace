@@ -126,7 +126,7 @@ spellings of MCP's `tools/list` and `tools/call`.
     The offer takes the declined prompt's turn, so it can't stack on the next one.
   - **The prompt's UI.** `.ask` uses a registered `DebugApprovalPresenter` first, else a system
     alert. DebugTraceUI's `DebugApprovalWindow` scene plus `.debugApprovalPrompts()` on the
-    app's windows registers one (visionOS 26 / macOS); use it in any app that can show only an
+    app's windows registers one (visionOS 26 / macOS 15); use it in any app that can show only an
     immersive space, where a UIKit alert has nothing to attach to. `.custom(_:silence:)` is for
     an app's own UI; `.allowAll` is for tests. `debugtrace-mcp` calls itself "An agent on
     <host>" (`DEBUGTRACE_CLIENT_NAME` overrides), the appstore page "App Store page on <host>".
