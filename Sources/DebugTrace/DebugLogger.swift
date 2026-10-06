@@ -62,7 +62,7 @@ public struct DebugLogRecord: Sendable, Identifiable {
 
     func entry(redactor: DebugRedactor) -> DebugLogEntry {
         DebugLogEntry(time: DebugTime.iso(date), level: level, subsystem: subsystem,
-                      category: category, message: redactor.redact(message.redacted))
+                      category: category, message: redactor.redact(message.redacted), sequence: sequence)
     }
 }
 

@@ -45,6 +45,9 @@ public struct DebugLogEntry: Codable, Sendable, Equatable {
     public let subsystem: String
     public let category: String
     public let message: String
+    /// Position in the app's log buffer, for reading on from it
+    /// (`_logs afterSequence=`). Nil for unified-log entries.
+    public var sequence: Int? = nil
 
     /// `2026-09-29T10:11:12.345Z N Render: message`. The subsystem is shown
     /// only when it is not the app's primary one.
@@ -61,6 +64,9 @@ public struct DebugLogQuery: Sendable {
     public var category: String?
     public var contains: String?
     public var limit: Int
+    /// Only buffer records after this sequence number; `since` is then
+    /// ignored. The app's own buffer only.
+    public var afterSequence: Int? = nil
 
     public init(since: Date, subsystems: [String], minimumLevel: DebugLogLevel = .info,
                 category: String? = nil, contains: String? = nil, limit: Int = 200) {
@@ -78,6 +84,9 @@ public struct DebugLogResult: Sendable {
     public let entries: [DebugLogEntry]
     /// How many entries matched before `limit` was applied.
     public let matched: Int
+    /// For the app's buffer: the newest sequence number examined, matched or
+    /// not. Pass it back as `afterSequence` to read only what came after.
+    public var lastSequence: Int? = nil
     public var truncated: Bool { matched > entries.count }
 }
 
@@ -109,8 +118,16 @@ public enum DebugLogReader {
         let limit = max(1, query.limit)
         var kept: [DebugLogEntry] = []
         var matched = 0
-        for record in buffer.records() {
-            guard record.date >= query.since, record.level >= query.minimumLevel else { continue }
+        // The cursor is the newest record looked at, taken from the same
+        // snapshot, so a line appended mid-read is neither skipped nor
+        // returned twice.
+        // Clamped to what exists, so a cursor from a previous launch (or a
+        // guess) can't skip the lines that come next.
+        var lastSequence = min(query.afterSequence ?? Int.max, buffer.nextSequence - 1)
+        for record in buffer.records(after: query.afterSequence ?? 0) {
+            lastSequence = max(lastSequence, record.sequence)
+            guard query.afterSequence != nil || record.date >= query.since,
+                  record.level >= query.minimumLevel else { continue }
             if let category = query.category, record.category != category { continue }
             if !query.subsystems.isEmpty, !query.subsystems.contains(record.subsystem) { continue }
             let entry = record.entry(redactor: redactor)
@@ -121,7 +138,7 @@ public enum DebugLogReader {
             kept.append(entry)
         }
         if kept.count > limit { kept.removeFirst(kept.count - limit) }
-        return DebugLogResult(entries: kept, matched: matched)
+        return DebugLogResult(entries: kept, matched: matched, lastSequence: lastSequence)
     }
 
     /// The unified log. An empty `subsystems` reads every subsystem in the

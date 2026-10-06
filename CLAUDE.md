@@ -104,9 +104,10 @@ spellings of MCP's `tools/list` and `tools/call`.
 ## Security model
 
 - **Token.** `Authentication.automatic` (the default) takes `DEBUGTRACE_TOKEN` from the
-  launch environment, which `bas --mcp` sets to a fresh per-launch token recorded only in
-  that session's record. A bundle credential's `CommandToken` is the fallback; build-and-sign
-  no longer writes one. With neither, the server is open.
+  launch environment, else the bundle credential's `CommandToken`. build-and-sign writes a
+  per-build `CommandToken` into the credential and into the key ledger record (mode 600), and
+  `bas --mcp` passes that same token, so a session and a later attach agree. With neither,
+  the server is open.
 - **Loopback is not exempt:** on iOS, other apps on the same device can reach 127.0.0.1.
 - **Browsers are refused.** Any non-GET request carrying `Origin` gets a 403, so a web page
   can't POST commands through the user's browser. No CORS headers are sent. The old server
@@ -167,35 +168,45 @@ prints to `build/device-console.log`, which an LLM reads. When the app contains 
 format: only the app's lines, debug included, exported and redacted, in place of the whole
 unified log. `--log-all` mirrors the whole unified log instead.
 
-## The debug server runs only when asked for: `bas --mcp`
+## When the debug server runs
 
 Every app links `DebugTraceServer` and calls `DebugTraceServer.startIfRequested()` once at
-launch. The server starts only when the launch environment has `DEBUGTRACE_SERVER=1`, in a
-development build, and only `build-and-sign --mcp` sets that. Every other launch, including
-a relaunch from the home screen, runs no server, so MCP use is explicit. There are no in-app
-toggles.
+launch. It starts in a **development** build when either:
 
+- build-and-sign signed it, so its credential carries a `CommandToken`. That is every launch
+  of such a build, from the home screen too, so a client can **attach to an app that is
+  already running** with its state intact. `DEBUGTRACE_SERVER=0` in the launch environment,
+  or `DEBUGTRACE_SERVER=off` in a repo's build-signing.conf, turns this off.
+- the launch environment sets `DEBUGTRACE_SERVER=1` (`bas --mcp`, or an Xcode scheme).
+
+An Xcode run has no credential, so it listens only when asked. A release build (App Store,
+TestFlight) never listens: `requested(...)` and `start()` both refuse.
+
+- **No Local Network prompt in shipped apps.** The prompt comes from binding the listener.
+  build-and-sign adds `NSLocalNetworkUsageDescription` and `NSBonjourServices`
+  (`_debugtrace._tcp`) to the Info.plist of the dev builds it signs, only when absent. An app's
+  own Info.plist doesn't need either key for debugging, so an App Store build of an app with no
+  LAN feature carries neither and never prompts.
+- **Bonjour.** The listener advertises `_debugtrace._tcp` (TXT: `bundleId`, `build`,
+  `version`, `name`, `keyId`) when the Info.plist declares that type; iOS refuses undeclared
+  types, so without it the server still runs, unadvertised. `debugtrace-mcp` browses with
+  `dns-sd -Z`, looks the `keyId` up in the ledger for the token, and lists the app.
+  `debugtrace-mcp discover` prints the same as JSON (no tokens) for other tools, such as the
+  appstore page. Bonjour is local-network only; over Tailscale, `bas --mcp` records a session.
 - **Ports are not identities.** The server takes the first free port in 8642–8691, so several
-  apps can serve at once. Nothing maps ports to apps.
-- **The registry is on the Mac, next to the pid files.** `bas --mcp` implies `--log`. The
-  `devicectl --console` process it starts exits when the app does, so its pid is the
-  session's liveness. After launch, `bas` reads the port from the server's
-  `listening on port N` line and finds a reachable host: the device name lowercased first,
-  which is its tailnet name (`avp`), then the CoreDevice tunnel address. It records the
-  session in `~/.local/state/debugtrace/sessions/<bundle id>@<device>.json` with that pid.
+  apps can serve at once. Discovery and session records carry the port.
+- **Session records** (`bas --mcp`, which implies `--log`) live in
+  `~/.local/state/debugtrace/sessions/<bundle id>@<device>.json`, with the pid of the
+  `devicectl --console` process as liveness. `bas` reads the port from the server's
+  `listening on port N` line and finds a reachable host: the device name lowercased first
+  (its tailnet name, `avp`), then the CoreDevice tunnel address. A record wins over the same
+  app's Bonjour advertisement, since it also has the console log.
 - **One MCP entry for every agent.** `apps` runs `Tools/debugtrace-mcp`, a stdio server with no
-  dependencies. It is registered at Claude Code user scope, and `agents-sync` copies it to
-  Codex and Copilot. It reads the sessions on every call, drops those whose pid is gone, and
-  checks `_info` so a reused port can't misroute. Its four tools never change: `apps`,
-  `help`, `call` and `trace`. So an agent session that started before the app launched still
-  works.
-- **Auth needs no agent configuration.** `bas` keeps one token in
-  `~/.config/debugtrace/token` (mode 600) and passes it as `DEBUGTRACE_TOKEN`.
-  `Authentication.automatic` requires it, and `debugtrace-mcp` reads the same file.
-- **App Store review sees nothing.** Nobody can set a launch environment on a store build,
-  and `start()` refuses in release mode anyway. The Local Network prompt (binding a listener)
-  therefore appears only in `bas --mcp` launches, and every app still needs
-  `NSLocalNetworkUsageDescription` for those.
+  dependencies, registered at Claude Code user scope and copied to Codex and Copilot by
+  `agents-sync`. It reads records and browses on each call (cached 5 s), and checks `_info` so
+  a reused port can't misroute. Its four tools never change: `apps`, `help`, `call`, `trace`.
+- **Live tail.** `_logs` takes `afterSequence` (a reply's `lastSequence`) and `waitSeconds`
+  (long poll, up to 25 s) on the app's own buffer. The cursor is clamped to what exists.
 
 Keep the `listening on port N` wording and both marker strings (`DEBUGTRACE_STDERR`,
 `DEBUGTRACE_SERVER`): the script depends on them.

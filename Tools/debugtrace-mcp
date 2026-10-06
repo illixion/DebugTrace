@@ -18,6 +18,16 @@ still works:
     call(app, endpoint, arguments?)  run one endpoint
     trace(app, note?)             capture a debug trace and save the zip here
 
+Apps are found two ways: the session records above, and Bonjour. Every dev
+build that build-and-sign signs starts its server on each launch and
+advertises it as _debugtrace._tcp, with its key id in the TXT record; the key
+ledger (~/.local/state/debugtrace/keys) holds that build's token. So an app
+that is already running can be attached to without a relaunch. Bonjour
+reaches the local network only; over Tailscale, use `bas --mcp`.
+
+`debugtrace-mcp discover` prints what is found, as JSON (tokens left out),
+for other tools on this Mac such as the appstore page.
+
 `app` may be omitted when only one is running. Each launch has its own bearer
 token, which bas passes to the app and keeps in the session record (mode 600),
 so no agent needs a header configured; ~/.config/debugtrace/token is only a
@@ -27,14 +37,20 @@ fallback for servers started some other way. Standard library only.
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
 STATE_DIR = os.path.expanduser(os.environ.get("DEBUGTRACE_STATE_DIR", "~/.local/state/debugtrace"))
 SESSIONS_DIR = os.path.join(STATE_DIR, "sessions")
 TOKEN_FILE = os.path.expanduser(os.environ.get("DEBUGTRACE_TOKEN_FILE", "~/.config/debugtrace/token"))
+KEY_DIR = os.path.expanduser(os.environ.get("DEBUGTRACE_KEY_DIR") or os.path.join(
+    os.environ.get("XDG_STATE_HOME") or "~/.local/state", "debugtrace", "keys"))
+SERVICE_TYPE = "_debugtrace._tcp"
+BROWSE_SECONDS = float(os.environ.get("DEBUGTRACE_BROWSE_SECONDS", "1.5"))
 PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 CALL_TIMEOUT_SECONDS = 200
 
@@ -124,7 +140,116 @@ def pid_is_console_streamer(pid):
     return "devicectl" in command
 
 
-def live_sessions():
+# MARK: Bonjour
+
+_ZONE_LINE = re.compile(r"^(\S+)\s+(SRV|TXT)\s+(.*)$")
+_TXT_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _unescape(text):
+    """dns-sd's zone escapes: \\DDD (decimal byte) and \\X (literal X)."""
+    out = bytearray()
+    i = 0
+    raw = text.encode()
+    while i < len(raw):
+        if raw[i] == 0x5C and i + 3 < len(raw) and raw[i + 1:i + 4].isdigit():
+            out.append(int(raw[i + 1:i + 4]))
+            i += 4
+        elif raw[i] == 0x5C and i + 1 < len(raw):
+            out.append(raw[i + 1])
+            i += 2
+        else:
+            out.append(raw[i])
+            i += 1
+    return out.decode("utf-8", "replace")
+
+
+def parse_zone(text):
+    """`dns-sd -Z` output -> [{instance, host, port, txt}] for complete services."""
+    services = {}
+    suffix = "." + SERVICE_TYPE
+    for line in text.splitlines():
+        match = _ZONE_LINE.match(line.strip())
+        if not match or not match.group(1).endswith(suffix):
+            continue
+        name = _unescape(match.group(1)[:-len(suffix)])
+        entry = services.setdefault(name, {"instance": name})
+        if match.group(2) == "SRV":
+            fields = match.group(3).split()
+            if len(fields) >= 4 and fields[2].isdigit():
+                entry["port"] = int(fields[2])
+                entry["host"] = fields[3].rstrip(".")
+        else:
+            txt = {}
+            for item in _TXT_STRING.findall(match.group(3)):
+                key, _, value = _unescape(item).partition("=")
+                txt[key] = value
+            entry["txt"] = txt
+    return [s for s in services.values() if "port" in s and "txt" in s]
+
+
+def browse(seconds=None):
+    """One short `dns-sd -Z` run; [] when dns-sd is missing or finds nothing."""
+    try:
+        process = subprocess.Popen(["dns-sd", "-Z", SERVICE_TYPE, "local"], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True)
+    except OSError:
+        return []
+    time.sleep(BROWSE_SECONDS if seconds is None else seconds)
+    process.terminate()
+    try:
+        output, _ = process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        output, _ = process.communicate()
+    return parse_zone(output or "")
+
+
+def ledger_record(key_id):
+    if not key_id or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", key_id):
+        return None
+    try:
+        with open(os.path.join(KEY_DIR, f"{key_id}.json")) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def discovered_sessions(services=None):
+    """Advertised servers as session dicts. `attachable` is false, with a
+    reason, when this Mac's ledger has no token for that build."""
+    sessions = []
+    for service in browse() if services is None else services:
+        txt = service["txt"]
+        record = ledger_record(txt.get("keyId"))
+        session = {
+            "appName": txt.get("name") or service["instance"], "bundleId": txt.get("bundleId"),
+            "build": txt.get("build"), "version": txt.get("version"), "keyId": txt.get("keyId"),
+            "device": (record or {}).get("device") or service["host"].removesuffix(".local"),
+            "url": f"http://{service['host']}:{service['port']}", "startedAt": None, "source": "bonjour",
+        }
+        if record and record.get("commandToken"):
+            session["token"] = record["commandToken"]
+            session["attachable"] = True
+        else:
+            session["attachable"] = False
+            session["reason"] = ("built on another Mac, or before per-build tokens: not in this Mac's key ledger"
+                                 if not record else "this build has no command token; rebuild it with build-and-sign")
+        sessions.append(session)
+    return sessions
+
+
+_discovery = {"at": 0.0, "sessions": []}
+
+
+def recent_discoveries(max_age=5.0):
+    if time.monotonic() - _discovery["at"] > max_age:
+        _discovery["sessions"] = discovered_sessions()
+        _discovery["at"] = time.monotonic()
+    return _discovery["sessions"]
+
+
+def session_records():
     sessions = []
     try:
         names = sorted(os.listdir(SESSIONS_DIR))
@@ -151,16 +276,37 @@ def live_sessions():
     return sessions
 
 
+def _port(url):
+    return url.rsplit(":", 1)[-1].rstrip("/")
+
+
+def all_sessions():
+    """Session records (bas --mcp: console attached) plus attachable Bonjour
+    finds. A record wins over its own advertisement, matched on bundle id and port."""
+    sessions = session_records()
+    seen = {(s.get("bundleId"), _port(s.get("url", ""))) for s in sessions}
+    for found in recent_discoveries():
+        if (found.get("bundleId"), _port(found["url"])) not in seen:
+            sessions.append(found)
+    return sessions
+
+
+def live_sessions():
+    return [s for s in all_sessions() if s.get("attachable", True)]
+
+
 def describe(session):
     # Never the token.
-    return {key: session.get(key) for key in ("appName", "bundleId", "device", "url", "startedAt", "consoleLog")}
+    keys = ("appName", "bundleId", "build", "device", "url", "startedAt", "consoleLog", "source", "attachable", "reason")
+    return {key: session[key] for key in keys if session.get(key) is not None}
 
 
 def resolve(app):
     sessions = live_sessions()
     if not sessions:
         raise ToolError("no app is running with its debug server",
-                        "launch one with `build-and-sign --mcp` (from the app's repo), then call `apps`")
+                        "open a dev build signed by build-and-sign on a device on this network, or launch one "
+                        "with `build-and-sign --mcp` (from the app's repo), then call `apps`")
     if not app:
         if len(sessions) == 1:
             return sessions[0]
@@ -229,7 +375,8 @@ def verified(session):
         info = {}
     bundle = ((info.get("data") or {}).get("app") or {}).get("bundleId")
     if status == 401:
-        raise ToolError(f"{session.get('appName')} refused the token", "relaunch it with `build-and-sign --mcp`, which passes the current one")
+        raise ToolError(f"{session.get('appName')} refused the token",
+                        "the build on the device is not the one the ledger describes; reinstall it with build-and-sign")
     if bundle and bundle != session.get("bundleId"):
         raise ToolError(f"{session['url']} is now served by {bundle}, not {session.get('bundleId')}",
                         "relaunch the app with `build-and-sign --mcp` to refresh its session")
@@ -257,9 +404,10 @@ def save_file(session, relative, data):
 
 
 def tool_apps(_):
-    sessions = live_sessions()
+    sessions = all_sessions()
     if not sessions:
-        return text_result({"apps": [], "hint": "launch an app with `build-and-sign --mcp` to make it appear here"})
+        return text_result({"apps": [], "hint": "open a dev build signed by build-and-sign on a device on this network, "
+                                                "or launch one with `build-and-sign --mcp`"})
     return text_result({"apps": [describe(s) for s in sessions]})
 
 
@@ -415,6 +563,9 @@ def handle(message):
 
 
 def main():
+    if sys.argv[1:2] == ["discover"]:
+        print(json.dumps([describe(s) | {"keyId": s.get("keyId")} for s in all_sessions()], indent=2))
+        return
     for line in sys.stdin:
         line = line.strip()
         if not line:

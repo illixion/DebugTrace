@@ -146,5 +146,82 @@ class OtherTools(unittest.TestCase):
         self.assertTrue(reply["result"]["isError"])
 
 
+ZONE = r"""Browsing for _debugtrace._tcp.local
+_debugtrace._tcp                                PTR     Spatial\032Home\032\195\169._debugtrace._tcp
+Spatial\032Home\032\195\169._debugtrace._tcp   SRV     0 0 8643 ixPhone.local. ; Replace with unicast FQDN of target host
+Spatial\032Home\032\195\169._debugtrace._tcp   TXT     "txtvers=1" "bundleId=pro.example.home" "name=Spatial Home" "keyId=k1" "build=abc1234"
+Half._debugtrace._tcp                           SRV     0 0 8644 avp.local. ; no TXT yet
+_other._tcp                                     PTR     Nope._other._tcp
+Nope._other._tcp                                SRV     0 0 1 x.local.
+Nope._other._tcp                                TXT     "a=b"
+"""
+
+
+class Discovery(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.keys = tempfile.mkdtemp()
+        self._saved_dir = mcp.KEY_DIR
+        mcp.KEY_DIR = self.keys
+
+    def tearDown(self):
+        mcp.KEY_DIR = self._saved_dir
+
+    def ledger(self, key_id, **record):
+        with open(os.path.join(self.keys, f"{key_id}.json"), "w") as handle:
+            json.dump(record, handle)
+
+    def test_parses_complete_services_only(self):
+        services = mcp.parse_zone(ZONE)
+        self.assertEqual(len(services), 1)
+        service, = services
+        self.assertEqual(service["instance"], "Spatial Home é")
+        self.assertEqual((service["host"], service["port"]), ("ixPhone.local", 8643))
+        self.assertEqual(service["txt"]["bundleId"], "pro.example.home")
+        self.assertEqual(service["txt"]["name"], "Spatial Home")
+
+    def test_txt_values_with_quotes_and_equals(self):
+        zone = 'A._debugtrace._tcp SRV 0 0 1 h.local.\nA._debugtrace._tcp TXT "name=say \\"hi\\"" "x=a=b"'
+        service, = mcp.parse_zone(zone)
+        self.assertEqual(service["txt"]["name"], 'say "hi"')
+        self.assertEqual(service["txt"]["x"], "a=b")
+
+    def test_ledger_token_makes_a_service_attachable(self):
+        self.ledger("k1", device="ixPhone", commandToken="tok")
+        session, = mcp.discovered_sessions(mcp.parse_zone(ZONE))
+        self.assertTrue(session["attachable"])
+        self.assertEqual(session["token"], "tok")
+        self.assertEqual(session["url"], "http://ixPhone.local:8643")
+        self.assertEqual(session["device"], "ixPhone")
+        self.assertNotIn("token", mcp.describe(session))
+
+    def test_unknown_or_tokenless_builds_are_listed_but_not_attachable(self):
+        session, = mcp.discovered_sessions(mcp.parse_zone(ZONE))
+        self.assertFalse(session["attachable"])
+        self.assertIn("ledger", session["reason"])
+        self.ledger("k1", device="ixPhone")
+        session, = mcp.discovered_sessions(mcp.parse_zone(ZONE))
+        self.assertFalse(session["attachable"])
+        self.assertIn("no command token", session["reason"])
+
+    def test_key_ids_cannot_escape_the_ledger(self):
+        self.assertIsNone(mcp.ledger_record("../../etc/passwd"))
+        self.assertIsNone(mcp.ledger_record(None))
+
+    def test_a_session_record_wins_over_its_own_advertisement(self):
+        saved = (mcp.session_records, mcp.recent_discoveries)
+        try:
+            mcp.session_records = lambda: [{"bundleId": "pro.example.home", "url": "http://ixphone:8643", "consoleLog": "/x"}]
+            mcp.recent_discoveries = lambda: [
+                {"bundleId": "pro.example.home", "url": "http://ixPhone.local:8643", "attachable": True},
+                {"bundleId": "pro.example.other", "url": "http://ixPhone.local:8644", "attachable": False},
+            ]
+            sessions = mcp.all_sessions()
+            self.assertEqual([s.get("consoleLog") for s in sessions], ["/x", None])
+            self.assertEqual(len(mcp.live_sessions()), 1)
+        finally:
+            mcp.session_records, mcp.recent_discoveries = saved
+
+
 if __name__ == "__main__":
     unittest.main()

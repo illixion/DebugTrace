@@ -25,7 +25,17 @@ import os
 ///   drive commands through the browser.
 ///
 /// Binding a listener triggers the Local Network privacy prompt: the host app
-/// needs `NSLocalNetworkUsageDescription`, or it hears nothing.
+/// needs `NSLocalNetworkUsageDescription`, or it hears nothing. build-and-sign
+/// adds that key, and `NSBonjourServices` for the advertisement, to the
+/// Info.plist of the dev builds it signs, so an app's own plist (and with it
+/// the App Store build) never has to carry them.
+///
+/// **When it runs.** `startIfRequested()` starts it in a development build
+/// that build-and-sign signed (its credential carries a `CommandToken`), on
+/// every launch, so a client can attach to an app that is already running.
+/// It also starts for an explicit `DEBUGTRACE_SERVER=1`. An App Store or
+/// TestFlight build is `release` and has no credential, so it never listens
+/// and never shows the Local Network prompt.
 @MainActor
 public final class DebugTraceServer {
     public enum Binding: Sendable {
@@ -62,19 +72,25 @@ public final class DebugTraceServer {
         /// development launch, and this keeps it that way even if a caller
         /// forgets to check.
         public var allowedInRelease: Bool
+        /// Advertise over Bonjour as `_debugtrace._tcp`, with the bundle id,
+        /// build and key id in the TXT record, so clients find the app
+        /// without knowing its port. Only when the Info.plist declares the
+        /// type in `NSBonjourServices`: iOS refuses undeclared types.
+        public var advertises: Bool
 
         public static let defaultPorts: ClosedRange<UInt16> = 8642...8691
 
         /// `ports: 0...0` picks any free port (tests); read it back from `start()`.
         public init(ports: ClosedRange<UInt16> = Configuration.defaultPorts, binding: Binding = .network,
                     authentication: Authentication = .automatic, maxBodyBytes: Int = 1 << 20,
-                    redactsResponses: Bool = true, allowedInRelease: Bool = false) {
+                    redactsResponses: Bool = true, allowedInRelease: Bool = false, advertises: Bool = true) {
             self.ports = ports
             self.binding = binding
             self.authentication = authentication
             self.maxBodyBytes = maxBodyBytes
             self.redactsResponses = redactsResponses
             self.allowedInRelease = allowedInRelease
+            self.advertises = advertises
         }
     }
 
@@ -107,11 +123,40 @@ public final class DebugTraceServer {
 
     // MARK: Lifecycle
 
-    /// True when the launch environment sets `DEBUGTRACE_SERVER=1` in a
-    /// development build. Only `build-and-sign --mcp` does: the server is off
-    /// in every other launch, so MCP use is always explicit.
+    /// True in a development build that either build-and-sign signed (its
+    /// credential carries a `CommandToken`) or whose launch environment sets
+    /// `DEBUGTRACE_SERVER=1`. `DEBUGTRACE_SERVER=0` turns it off for one
+    /// launch. Never in release: App Store and TestFlight builds stay silent.
     public nonisolated static var requestedAtLaunch: Bool {
-        ProcessInfo.processInfo.environment["DEBUGTRACE_SERVER"] == "1" && DebugTrace.privacy == .development
+        requested(environment: ProcessInfo.processInfo.environment["DEBUGTRACE_SERVER"],
+                  privacy: DebugTrace.privacy, hasCommandToken: DebugTrace.credential?.commandToken != nil)
+    }
+
+    nonisolated static func requested(environment: String?, privacy: DebugPrivacyMode, hasCommandToken: Bool) -> Bool {
+        guard privacy == .development else { return false }
+        switch environment {
+        case "1": return true
+        case "0": return false
+        default: return hasCommandToken
+        }
+    }
+
+    public nonisolated static let serviceType = "_debugtrace._tcp"
+
+    /// Whether this app's Info.plist lets it advertise `serviceType`.
+    nonisolated static func declaresBonjourService(_ info: [String: Any]?) -> Bool {
+        (info?["NSBonjourServices"] as? [String])?.contains(serviceType) == true
+    }
+
+    /// The TXT record clients match on. Keys are short by Bonjour custom.
+    nonisolated static func txtRecord(info: [String: Any]?, keyId: String?) -> [String: String] {
+        var record: [String: String] = ["txtvers": "1"]
+        record["bundleId"] = info?["CFBundleIdentifier"] as? String
+        record["build"] = info?["CFBundleVersion"] as? String
+        record["version"] = info?["CFBundleShortVersionString"] as? String
+        record["name"] = (info?["CFBundleDisplayName"] as? String) ?? (info?["CFBundleName"] as? String)
+        record["keyId"] = keyId
+        return record
     }
 
     /// The server `startIfRequested()` started, if any.
@@ -171,6 +216,13 @@ public final class DebugTraceServer {
         }
         let requested: NWEndpoint.Port = candidate == 0 ? .any : (NWEndpoint.Port(rawValue: candidate) ?? .any)
         let listener = try NWListener(using: parameters, on: requested)
+        let info = Bundle.main.infoDictionary
+        if configuration.advertises, Self.declaresBonjourService(info) {
+            let txt = Self.txtRecord(info: info, keyId: DebugTrace.credential?.keyId)
+            // Bonjour renames on a clash, so two copies of an app still both appear.
+            listener.service = NWListener.Service(name: txt["name"] ?? txt["bundleId"], type: Self.serviceType,
+                                                  txtRecord: NWTXTRecord(txt))
+        }
         self.listener = listener
         let maxBody = configuration.maxBodyBytes
         let queue = queue

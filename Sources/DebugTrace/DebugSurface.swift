@@ -280,6 +280,8 @@ public final class DebugSurface {
                 .string("contains", "only entries whose message or category contains this text (case-insensitive, matched against the redacted text)"),
                 .integer("limit", "maximum entries returned; the newest are kept", default: 200, range: 1...5_000),
                 .string("format", "lines: one compact string per entry; json: objects", default: "lines", choices: ["lines", "json"]),
+                .integer("afterSequence", "source=app: only lines after this cursor (a reply's lastSequence); sinceSeconds is then ignored. Pass 0 for the whole buffer"),
+                .integer("waitSeconds", "source=app with afterSequence: wait up to this long for a matching line before replying (long poll, for a live tail)", default: 0, range: 0...25),
             ],
             trace: .never
         ) { arguments in
@@ -293,25 +295,51 @@ public final class DebugSurface {
                 throw DebugError(.forbidden, "this app does not share the unified log",
                                  hint: "use source=app; this app turned off includesSystemLog because framework log lines can carry personal data")
             }
-            let query = DebugLogQuery(
+            let after = arguments.int("afterSequence")
+            let wait = arguments.int("waitSeconds") ?? 0
+            if let after, after < 0 {
+                throw DebugError(.invalidArgument, "afterSequence must be 0 or more",
+                                 hint: "pass 0 for the whole buffer, then each reply's lastSequence")
+            }
+            if system && after != nil {
+                throw DebugError(.invalidArgument, "afterSequence reads the app's own buffer only",
+                                 hint: "drop source=system, or use sinceSeconds with it")
+            }
+            if wait > 0 && after == nil {
+                throw DebugError(.invalidArgument, "waitSeconds needs afterSequence",
+                                 hint: "pass afterSequence=0 first, then each reply's lastSequence")
+            }
+            var query = DebugLogQuery(
                 since: Date().addingTimeInterval(-Double(arguments.int("sinceSeconds") ?? 300)),
                 subsystems: [],
                 minimumLevel: DebugLogLevel(rawValue: arguments.string("level") ?? "info") ?? .info,
                 category: arguments.string("category"),
                 contains: arguments.string("contains"),
                 limit: arguments.int("limit") ?? 200)
-            let result = system
+            query.afterSequence = after
+            let initialQuery = query
+            var result = system
                 ? try await Task.detached(priority: .utility) {
-                    try DebugLogReader.read(query, redactor: configuration.redactor)
+                    try DebugLogReader.read(initialQuery, redactor: configuration.redactor)
                 }.value
                 : DebugLogReader.buffered(query, redactor: configuration.redactor)
+            // Long poll: the buffer has no change notification, and a 150 ms
+            // look is cheap next to a log line's own cost.
+            if !system, wait > 0, result.entries.isEmpty {
+                let deadline = ContinuousClock.now + .seconds(wait)
+                while result.entries.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    query.afterSequence = result.lastSequence
+                    result = DebugLogReader.buffered(query, redactor: configuration.redactor)
+                }
+            }
             let primary = configuration.subsystems.first
             let entries: JSONValue = arguments.string("format") == "json"
                 ? try JSONValue(encoding: result.entries)
                 : .array(result.entries.map { .string($0.line(primarySubsystem: primary)) })
             return DebugLogsReply(source: system ? "system" : "app", entries: entries,
                                   returned: result.entries.count, matched: result.matched,
-                                  truncated: result.truncated,
+                                  truncated: result.truncated, lastSequence: result.lastSequence,
                                   buffer: system ? nil : DebugLogBuffer.shared.stats)
         })
 
@@ -363,6 +391,8 @@ struct DebugLogsReply: Encodable {
     let returned: Int
     let matched: Int
     let truncated: Bool
+    /// For source=app: the cursor to pass back as afterSequence.
+    let lastSequence: Int?
     /// For source=app: fill and evictions, so a reader can tell "nothing
     /// happened" from "it scrolled out".
     let buffer: DebugLogBuffer.Stats?

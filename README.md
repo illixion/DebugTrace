@@ -31,7 +31,7 @@ DebugSurface.shared.register([
 
 DebugTrace.begin("world.streaming", "seed 42")        // feature breadcrumbs, any thread
 
-DebugTraceServer.startIfRequested()                  // only when launched by `bas --mcp`
+DebugTraceServer.startIfRequested()                  // dev builds from build-and-sign, or `bas --mcp`
 ```
 
 ```swift
