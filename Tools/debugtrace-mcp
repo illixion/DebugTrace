@@ -15,7 +15,7 @@ still works:
 
     apps                          what is running
     help(app, endpoint?)          the app's self-describing API, with schemas
-    call(app, endpoint, args?)    run one endpoint
+    call(app, endpoint, arguments?)  run one endpoint
     trace(app, note?)             capture a debug trace and save the zip here
 
 `app` may be omitted when only one is running. Each launch has its own bearer
@@ -68,7 +68,7 @@ TOOLS = [
     },
     {
         "name": "call",
-        "description": "Run one endpoint of a running app and return its result. Read `help` first for the endpoint's parameters. Built-ins every app has: _info, _logs (source=app|system, level, contains, limit, sinceSeconds), _features, _snapshot. Commands change app state.",
+        "description": "Run one endpoint of a running app and return its result. Pass the endpoint's parameters inside `arguments`, e.g. {\"endpoint\": \"_logs\", \"arguments\": {\"level\": \"error\"}}. Read `help` first for the endpoint's parameters. Built-ins every app has: _info, _logs (source=app|system, level, contains, limit, sinceSeconds), _features, _snapshot. Commands change app state.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -276,6 +276,8 @@ def tool_call(arguments):
     endpoint = arguments.get("endpoint")
     if not endpoint:
         raise ToolError("`endpoint` is required", "call `help` to list the app's endpoints")
+    if not isinstance(endpoint, str):
+        raise ToolError("`endpoint` must be a string", "call `help` to list the app's endpoints")
     status, content_type, raw = request(session, "/_call", {"name": endpoint, "arguments": arguments.get("arguments") or {}})
     if content_type.startswith("application/json"):
         return text_result(raw.decode("utf-8", "replace"), is_error=status >= 400)
@@ -308,6 +310,71 @@ def tool_trace(arguments):
 HANDLERS = {"apps": tool_apps, "help": tool_help, "call": tool_call, "trace": tool_trace}
 
 
+# MARK: Argument normalisation
+#
+# The main client is a language model, and models guess parameter names:
+# `args` or `params` for `arguments`, `name` for `endpoint`, or the endpoint's
+# own arguments flattened next to `endpoint`. Silently ignoring a guess ran a
+# command with its defaults, so each tool instead accepts the common
+# variants, says in the reply which it accepted, and rejects any other name
+# with the valid ones listed.
+
+ALIASES = {
+    "app": ("bundleId", "bundle_id", "bundle", "appName", "application"),
+    "endpoint": ("name", "endpointName", "endpoint_name", "tool", "method"),
+    "arguments": ("args", "params", "parameters", "input", "payload", "body"),
+}
+
+
+def normalize_arguments(tool_name, raw):
+    """(arguments, notes) with aliases resolved, or a ToolError saying what to use."""
+    import difflib
+
+    known = list(next(t for t in TOOLS if t["name"] == tool_name)["inputSchema"]["properties"])
+    taken = {}
+    notes = []
+    extras = {}
+    for key, value in raw.items():
+        canonical = key if key in known else next(
+            (name for name in known if key in ALIASES.get(name, ())), None)
+        if canonical is None:
+            extras[key] = value
+            continue
+        if canonical in taken:
+            raise ToolError(f"`{canonical}` was given twice (as `{taken[canonical]}` and `{key}`)",
+                            f"pass it once, as `{canonical}`")
+        taken[canonical] = key
+        if key != canonical:
+            notes.append(f"`{key}` was accepted as `{canonical}`; use `{canonical}` next time")
+    result = {taken_as: raw[source] for taken_as, source in taken.items()}
+
+    if tool_name == "call":
+        # `arguments` as a JSON string is a common slip; parse it.
+        if isinstance(result.get("arguments"), str):
+            try:
+                result["arguments"] = json.loads(result["arguments"])
+                notes.append("`arguments` was a JSON string; pass it as an object")
+            except ValueError:
+                raise ToolError("`arguments` is not valid JSON", "pass an object, e.g. {\"level\": \"error\"}")
+        if "arguments" in result and not isinstance(result["arguments"], dict):
+            raise ToolError("`arguments` must be an object keyed by the endpoint's parameter names",
+                            "call `help` for the endpoint's parameters")
+        # Arguments flattened next to `endpoint` are the endpoint's own.
+        if extras:
+            if "arguments" in result:
+                raise ToolError(f"unexpected top-level {', '.join('`' + k + '`' for k in extras)} alongside `arguments`",
+                                "put the endpoint's parameters inside `arguments`")
+            result["arguments"] = extras
+            notes.append(f"{', '.join('`' + k + '`' for k in extras)} were passed at the top level and "
+                         "treated as the endpoint's arguments; nest them under `arguments` next time")
+    elif extras:
+        key = next(iter(extras))
+        close = difflib.get_close_matches(key, known, n=1)
+        raise ToolError(f"unknown parameter `{key}` for `{tool_name}`",
+                        (f"did you mean `{close[0]}`? " if close else "") + f"valid parameters: {', '.join(known) or 'none'}")
+    return result, notes
+
+
 # MARK: JSON-RPC over stdio
 
 def handle(message):
@@ -331,7 +398,13 @@ def handle(message):
             return {"jsonrpc": "2.0", "id": request_id,
                     "error": {"code": -32602, "message": f"unknown tool {params.get('name')!r}; tools: {', '.join(HANDLERS)}"}}
         try:
-            result = handler(params.get("arguments") or {})
+            raw = params.get("arguments") or {}
+            if not isinstance(raw, dict):
+                raise ToolError("tool arguments must be an object")
+            arguments, notes = normalize_arguments(params["name"], raw)
+            result = handler(arguments)
+            if notes:
+                result["content"].append({"type": "text", "text": "note: " + "; ".join(notes)})
         except ToolError as error:
             result = text_result(error.text(), is_error=True)
         except Exception as error:  # never take the agent's MCP connection down

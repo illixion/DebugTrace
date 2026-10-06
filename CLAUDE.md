@@ -54,6 +54,14 @@ xcodebuild -scheme DebugTrace-Package -sdk iphoneos  -destination 'generic/platf
 xcodebuild -scheme DebugTrace-Package -sdk appletvos -destination 'generic/platform=tvOS' build
 ```
 
+`python3 -m unittest discover -s Tests/DebugTraceMCPTests` tests `Tools/debugtrace-mcp`.
+
+`Tools/debugtrace-mcp` forgives the guesses a model makes: `args`/`params`/`input` for
+`arguments`, `name` for `endpoint`, `bundleId` for `app`, a JSON-string `arguments`, and an
+endpoint's arguments flattened next to `endpoint`. It says in the reply which it accepted, and
+rejects any other name with a did-you-mean and the valid list. Keep that when adding a tool: a
+silently ignored parameter runs a command with its defaults.
+
 The tests use `/usr/bin/unzip` to check the zip writer, and `node` (if present) to prove the
 store's Node-side Ed25519 verify accepts what CryptoKit signs.
 
