@@ -46,6 +46,19 @@ enum HelpDocument {
         ]
     }
 
+    /// What `GET /` shows a caller without the token: how to get in, nothing
+    /// about which app this is.
+    static func anonymous() -> JSONValue {
+        [
+            "service": "debugtrace/1",
+            "auth": [
+                "required": true, "header": "Authorization: Bearer <token>",
+                "note": "the token is per build, in the key ledger of the Mac that built it (~/.local/state/debugtrace/keys); debugtrace-mcp finds and sends it for you",
+            ],
+            "next": "repeat this request with the token to see the app and its endpoints",
+        ]
+    }
+
     private static func describe(_ endpoint: DebugEndpoint, baseURL: String, auth: String) -> JSONValue {
         var entry: [String: JSONValue] = [
             "name": .string(endpoint.name),

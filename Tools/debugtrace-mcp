@@ -20,9 +20,11 @@ still works:
 
 Apps are found two ways: the session records above, and Bonjour. Every dev
 build that build-and-sign signs starts its server on each launch and
-advertises it as _debugtrace._tcp, with its key id in the TXT record; the key
-ledger (~/.local/state/debugtrace/keys) holds that build's token. So an app
-that is already running can be attached to without a relaunch. Bonjour
+advertises it as _debugtrace._tcp. The record names nothing: it carries a
+random nonce and a tag over it under the build's token, so only the key ledger
+(~/.local/state/debugtrace/keys) that holds the token can tell which app it is,
+and the app's identity comes from that ledger record. So an app that is
+already running can be attached to without a relaunch. Bonjour
 reaches the local network only; over Tailscale, use `bas --mcp`.
 
 `debugtrace-mcp discover` prints what is found, as JSON (tokens left out),
@@ -35,6 +37,8 @@ fallback for servers started some other way. Standard library only.
 """
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -216,20 +220,59 @@ def ledger_record(key_id):
         return None
 
 
+def advertisement_tag(token, nonce):
+    """The `t` a server with this token advertises for nonce `n`
+    (DebugTraceServer.advertisementTag)."""
+    digest = hmac.new(token.encode(), f"debugtrace-advert|{nonce}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest[:12]).decode().rstrip("=")
+
+
+def ledger_records():
+    """Every ledger record that holds a command token."""
+    records = []
+    try:
+        names = os.listdir(KEY_DIR)
+    except OSError:
+        return records
+    for name in names:
+        if name.endswith(".json"):
+            record = ledger_record(name[:-5])
+            if record and record.get("commandToken"):
+                records.append(record)
+    return records
+
+
+def recognise(txt, records):
+    """The ledger record behind an advertisement, or None. Current builds are
+    matched by their tag; builds from before it still name their keyId."""
+    nonce, tag = txt.get("n"), txt.get("t")
+    if nonce and tag:
+        for record in records:
+            if hmac.compare_digest(advertisement_tag(record["commandToken"], nonce), tag):
+                return record
+        return None
+    return ledger_record(txt.get("keyId"))
+
+
 def discovered_sessions(services=None):
     """Advertised servers as session dicts. `attachable` is false, with a
     reason, when this Mac's ledger has no token for that build."""
     sessions = []
-    for service in browse() if services is None else services:
+    services = browse() if services is None else services
+    records = ledger_records() if services else []
+    for service in services:
         txt = service["txt"]
-        record = ledger_record(txt.get("keyId"))
+        record = recognise(txt, records) or {}
+        project = os.path.basename(record.get("project") or "")
         session = {
-            "appName": txt.get("name") or service["instance"], "bundleId": txt.get("bundleId"),
-            "build": txt.get("build"), "version": txt.get("version"), "keyId": txt.get("keyId"),
-            "device": (record or {}).get("device") or service["host"].removesuffix(".local"),
+            "appName": txt.get("name") or project or record.get("bundleId") or "An unrecognised app",
+            "bundleId": record.get("bundleId") or txt.get("bundleId"),
+            "build": record.get("build") or txt.get("build"), "version": txt.get("version"),
+            "keyId": record.get("keyId") or txt.get("keyId"),
+            "device": record.get("device") or service["host"].removesuffix(".local"),
             "url": f"http://{service['host']}:{service['port']}", "startedAt": None, "source": "bonjour",
         }
-        if record and record.get("commandToken"):
+        if record.get("commandToken"):
             session["token"] = record["commandToken"]
             session["attachable"] = True
         else:

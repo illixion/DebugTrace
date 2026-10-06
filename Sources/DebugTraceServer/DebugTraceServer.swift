@@ -1,5 +1,6 @@
 import DebugTrace
 import Foundation
+import CryptoKit
 import Network
 import os
 
@@ -162,15 +163,31 @@ public final class DebugTraceServer {
         (info?["NSBonjourServices"] as? [String])?.contains(serviceType) == true
     }
 
-    /// The TXT record clients match on. Keys are short by Bonjour custom.
-    nonisolated static func txtRecord(info: [String: Any]?, keyId: String?) -> [String: String] {
-        var record: [String: String] = ["txtvers": "1"]
-        record["bundleId"] = info?["CFBundleIdentifier"] as? String
-        record["build"] = info?["CFBundleVersion"] as? String
-        record["version"] = info?["CFBundleShortVersionString"] as? String
-        record["name"] = (info?["CFBundleDisplayName"] as? String) ?? (info?["CFBundleName"] as? String)
-        record["keyId"] = keyId
-        return record
+    /// The TXT record, built so a passer-by on the network learns nothing:
+    /// no app name, bundle id or version, and nothing stable to recognise the
+    /// device by on the next network. `n` is a fresh random nonce per
+    /// listener and `t` a tag over it under this build's token, so only a Mac
+    /// whose key ledger holds the token can tell which app this is
+    /// (`debugtrace-mcp` tries each ledger token). A build without a token
+    /// advertises a bare record, which nobody can attach to anyway.
+    nonisolated static func txtRecord(token: String?, nonce: String) -> [String: String] {
+        guard let token else { return ["txtvers": "2"] }
+        return ["txtvers": "2", "n": nonce, "t": advertisementTag(token: token, nonce: nonce)]
+    }
+
+    /// base64url(HMAC-SHA256(token, "debugtrace-advert|" + nonce)), first 12
+    /// bytes. Truncated: it identifies, it doesn't authenticate.
+    nonisolated static func advertisementTag(token: String, nonce: String) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("debugtrace-advert|\(nonce)".utf8),
+                                                  using: SymmetricKey(data: Data(token.utf8)))
+        return Data(mac.prefix(12)).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    nonisolated static func randomNonce() -> String {
+        (0..<8).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
     }
 
     /// The server `startIfRequested()` started, if any.
@@ -234,10 +251,11 @@ public final class DebugTraceServer {
         let listener = try NWListener(using: parameters, on: requested)
         let info = Bundle.main.infoDictionary
         if configuration.advertises, Self.declaresBonjourService(info) {
-            let txt = Self.txtRecord(info: info, keyId: DebugTrace.credential?.keyId)
-            // Bonjour renames on a clash, so two copies of an app still both appear.
-            listener.service = NWListener.Service(name: txt["name"] ?? txt["bundleId"], type: Self.serviceType,
-                                                  txtRecord: NWTXTRecord(txt))
+            // The instance name is as opaque as the record: the app's own name
+            // would announce it to everyone on the network.
+            let nonce = Self.randomNonce()
+            listener.service = NWListener.Service(name: "debugtrace-\(nonce.prefix(8))", type: Self.serviceType,
+                                                  txtRecord: NWTXTRecord(Self.txtRecord(token: token, nonce: nonce)))
         }
         self.listener = listener
         let maxBody = configuration.maxBodyBytes
@@ -371,7 +389,8 @@ public final class DebugTraceServer {
                                              hint: "call this from curl or an MCP client, which send no Origin header")), nil)
         }
 
-        // Discovery stays open so a model can learn how to authenticate.
+        // Help stays open so a model can learn how to authenticate; what it
+        // shows past that needs the token.
         if request.method == "GET", path == "/" || path == "/_help" {
             return (help(request), nil)
         }
@@ -520,6 +539,12 @@ public final class DebugTraceServer {
     }
 
     private func help(_ request: HTTPRequest) -> HTTPResponse {
+        // Without this build's token, only how to authenticate: the app's
+        // name, version and endpoint list would identify it to anyone who
+        // finds the port.
+        if token != nil, authenticate(request) != nil {
+            return .json(200, HelpDocument.anonymous().serialized(pretty: request.query["pretty"] != "0"))
+        }
         let only = request.query["endpoint"]
         if let only, surface.endpoint(named: only) == nil {
             return errorResponse(surface.notFound(only))

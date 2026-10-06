@@ -35,15 +35,16 @@ import Testing
         #expect(!DebugTraceServer.declaresBonjourService(nil))
     }
 
-    @Test func txtRecordNamesTheBuild() {
-        let txt = DebugTraceServer.txtRecord(info: [
-            "CFBundleIdentifier": "pro.example.app", "CFBundleVersion": "abc1234",
-            "CFBundleShortVersionString": "1.0", "CFBundleName": "Example",
-        ], keyId: "k1")
-        #expect(txt == ["txtvers": "1", "bundleId": "pro.example.app", "build": "abc1234",
-                        "version": "1.0", "name": "Example", "keyId": "k1"])
-        #expect(DebugTraceServer.txtRecord(info: ["CFBundleDisplayName": "Shown", "CFBundleName": "Inner"], keyId: nil)["name"] == "Shown")
-        #expect(DebugTraceServer.txtRecord(info: nil, keyId: nil) == ["txtvers": "1"])
+    @Test func theAdvertisementNamesNothingAndOnlyTheTokenRecognisesIt() {
+        let txt = DebugTraceServer.txtRecord(token: "tok", nonce: "0011223344556677")
+        #expect(Set(txt.keys) == ["txtvers", "n", "t"])
+        #expect(txt["n"] == "0011223344556677")
+        // The value debugtrace-mcp computes (Tests/DebugTraceMCPTests checks the same pair).
+        #expect(txt["t"] == DebugTraceServer.advertisementTag(token: "tok", nonce: "0011223344556677"))
+        #expect(txt["t"] == "2q1z0OLi6fUaWdLY")
+        #expect(DebugTraceServer.advertisementTag(token: "other", nonce: "0011223344556677") != txt["t"])
+        #expect(DebugTraceServer.txtRecord(token: nil, nonce: "x") == ["txtvers": "2"])
+        #expect(DebugTraceServer.randomNonce() != DebugTraceServer.randomNonce())
     }
 
     @MainActor @Test func aTokenRecordedInTheCredentialIsTheOneDemanded() throws {

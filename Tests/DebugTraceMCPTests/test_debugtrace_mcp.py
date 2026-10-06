@@ -204,6 +204,24 @@ class Discovery(unittest.TestCase):
         self.assertFalse(session["attachable"])
         self.assertIn("no command token", session["reason"])
 
+    def test_a_tagged_advertisement_is_recognised_only_by_the_ledger_holding_its_token(self):
+        nonce = "0011223344556677"
+        # The pair DebugTraceServer's AttachTests pins too.
+        self.assertEqual(mcp.advertisement_tag("tok", nonce), "2q1z0OLi6fUaWdLY")
+        zone = ('debugtrace-00112233._debugtrace._tcp SRV 0 0 8642 ixPhone.local.\n'
+                f'debugtrace-00112233._debugtrace._tcp TXT "txtvers=2" "n={nonce}" "t={mcp.advertisement_tag("tok", nonce)}"')
+        session, = mcp.discovered_sessions(mcp.parse_zone(zone))
+        self.assertFalse(session["attachable"])
+        self.assertIsNone(session["bundleId"])
+        self.ledger("k0", keyId="k0", bundleId="pro.example.nope", commandToken="other")
+        self.ledger("k2", keyId="k2", bundleId="pro.example.home", build="abc1234", device="ixPhone",
+                    project="/Users/x/Projects/SpatialHome", commandToken="tok")
+        session, = mcp.discovered_sessions(mcp.parse_zone(zone))
+        self.assertTrue(session["attachable"])
+        self.assertEqual((session["appName"], session["bundleId"], session["build"], session["keyId"]),
+                         ("SpatialHome", "pro.example.home", "abc1234", "k2"))
+        self.assertEqual(session["token"], "tok")
+
     def test_key_ids_cannot_escape_the_ledger(self):
         self.assertIsNone(mcp.ledger_record("../../etc/passwd"))
         self.assertIsNone(mcp.ledger_record(None))

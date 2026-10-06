@@ -72,7 +72,8 @@ anything:
 
 - **Self-describing.** `GET /` lists conventions and every endpoint, each with typed
   parameters, defaults, ranges and a runnable `curl` line. `?endpoint=<name>` narrows it
-  to one. Help stays unauthenticated so a model can learn how to authenticate.
+  to one. Help stays unauthenticated so a model can learn how to authenticate, but without
+  the token it shows only that: no app identity, no endpoint list (see "No fingerprints").
 - **One envelope.** A success is `{ok: true, endpoint, elapsedMs, data}`. A failure is
   `{ok: false, error: {code, message, hint, details?}}`. **Every error needs a `hint` that
   says what to do next.** A model retries a hintless error verbatim.
@@ -114,7 +115,7 @@ spellings of MCP's `tools/list` and `tools/call`.
   launch), *Always for This Build* (remembered in UserDefaults per `CFBundleVersion`) and
   *Don't Allow* (sticks for the launch). Concurrent requests share one prompt; a request waits
   up to `approvalTimeout` (60 s), then gets a 403 saying the prompt is open. Help (`GET /`)
-  needs neither token nor approval. The name is the client's own label, not an identity: the
+  needs no approval, and shows the app only with the token. The name is the client's own label, not an identity: the
   token is what proves the caller holds this build's ledger, which is why a flood of made-up
   names is handled as spam rather than authenticated away:
   - **One prompt on screen at a time.** Prompts for different clients queue behind each other,
@@ -134,6 +135,20 @@ spellings of MCP's `tools/list` and `tools/call`.
   can't POST commands through the user's browser. No CORS headers are sent. The old server
   sent `Access-Control-Allow-Origin: *`, which let any page read state.
 - **Binding.** `.network` prohibits cellular. `.loopback` is loopback only.
+- **Use Tailscale, not the LAN, from anywhere but home.** The server speaks plain HTTP, so on
+  a LAN the bearer token, and the replies, cross the network in clear: anyone who can sniff
+  it (open Wi-Fi, hotels, conferences) can replay the token, and copy the approved client's
+  label with it. Over Tailscale WireGuard encrypts both. `bas --mcp` already prefers the
+  device's tailnet name.
+- **No fingerprints.** A dev build carries its server onto every network it joins, so nothing
+  it shows a stranger may say which app, build or device it is. The Bonjour record and
+  instance name are opaque (below), and `GET /` without the token is reduced to how to
+  authenticate. A tokenless server (an Xcode run with `DEBUGTRACE_SERVER=1`) has nothing to
+  gate on and shows its full help.
+- **Power.** An idle listener costs nothing: a suspended app gets no CPU however many
+  sockets it holds, and a connection to it isn't delivered until it resumes, so the open port
+  can't wake the device. The advertisement is answered by `mDNSResponder`, which runs anyway.
+  iOS reclaims a suspended app's listener; the server notices on resume and listens again.
 
 ## Logging and privacy
 
@@ -208,10 +223,14 @@ TestFlight) never listens: `requested(...)` and `start()` both refuse.
   (`_debugtrace._tcp`) to the Info.plist of the dev builds it signs, only when absent. An app's
   own Info.plist doesn't need either key for debugging, so an App Store build of an app with no
   LAN feature carries neither and never prompts.
-- **Bonjour.** The listener advertises `_debugtrace._tcp` (TXT: `bundleId`, `build`,
-  `version`, `name`, `keyId`) when the Info.plist declares that type; iOS refuses undeclared
-  types, so without it the server still runs, unadvertised. `debugtrace-mcp` browses with
-  `dns-sd -Z`, looks the `keyId` up in the ledger for the token, and lists the app.
+- **Bonjour.** The listener advertises `_debugtrace._tcp` as `debugtrace-<nonce>` with TXT
+  `txtvers=2`, `n` (a random nonce, new per listener) and `t` (base64url of the first 12
+  bytes of `HMAC-SHA256(token, "debugtrace-advert|" + n)`), when the Info.plist declares
+  that type; iOS refuses undeclared types, so without it the server still runs,
+  unadvertised. No app name, bundle id or stable id, so the record can't identify the app or
+  follow the device between networks. `debugtrace-mcp` browses with `dns-sd -Z`, finds the
+  ledger record whose token makes that tag, and lists the app under that record's identity.
+  `txtvers=1` records from older builds, which name their `keyId`, are still recognised.
   `debugtrace-mcp discover` prints the same as JSON (no tokens) for other tools, such as the
   appstore page. Bonjour is local-network only; over Tailscale, `bas --mcp` records a session.
 - **Ports are not identities.** The server takes the first free port in 8642–8691, so several

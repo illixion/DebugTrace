@@ -59,19 +59,33 @@ import Testing
         return (server, Client(base: URL(string: "http://127.0.0.1:\(port)")!, session: URLSession(configuration: configuration)))
     }
 
-    @Test func helpIsOpenAndSelfDescribing() async throws {
+    @Test func helpWithoutTheTokenSaysHowToAuthenticateAndNothingAboutTheApp() async throws {
         let (server, client) = try await start()
         defer { server.stop() }
-        let (status, help) = try await client.json("GET", "/", token: nil)
+        for token in [nil, "wrong"] {
+            let (status, help) = try await client.json("GET", "/", token: token)
+            #expect(status == 200)
+            #expect(help["auth"]?["required"] == true)
+            #expect(help["app"] == nil)
+            #expect(help["endpoints"] == nil)
+            #expect(try await client.json("GET", "/_help?endpoint=position", token: token).1["endpoints"] == nil)
+        }
+    }
+
+    @Test func helpWithTheTokenIsSelfDescribing() async throws {
+        let (server, client) = try await start()
+        defer { server.stop() }
+        let (status, help) = try await client.json("GET", "/", token: "secret")
         #expect(status == 200)
         #expect(help["auth"]?["required"] == true)
+        #expect(help["app"]?["bundleId"] != nil)
         let endpoints = help["endpoints"]?.arrayValue ?? []
         let teleport = try #require(endpoints.first { $0["name"] == "teleport" })
         #expect(teleport["method"] == "POST")
         #expect(teleport["example"]?.stringValue?.contains(#"-d '{"x":0,"z":0}'"#) == true)
         #expect(endpoints.first?["name"]?.stringValue?.hasPrefix("_") == true)
 
-        let (_, one) = try await client.json("GET", "/_help?endpoint=position", token: nil)
+        let (_, one) = try await client.json("GET", "/_help?endpoint=position", token: "secret")
         #expect(one["endpoints"]?.arrayValue?.count == 1)
     }
 
