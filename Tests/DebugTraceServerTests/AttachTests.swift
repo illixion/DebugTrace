@@ -52,7 +52,7 @@ import Testing
         let previous = DebugTrace.credential
         DebugTrace.setCredential(credential)
         defer { DebugTrace.setCredential(previous) }
-        let server = DebugTraceServer(surface: DebugSurface(), configuration: .init(ports: 0...0, binding: .loopback))
+        let server = DebugTraceServer(surface: DebugSurface(), configuration: .init(ports: 0...0, binding: .loopback, approval: .allowAll))
         #expect(server.token == "per-build-token" || ProcessInfo.processInfo.environment["DEBUGTRACE_TOKEN"] != nil)
     }
 }

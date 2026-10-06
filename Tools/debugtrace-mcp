@@ -50,6 +50,7 @@ TOKEN_FILE = os.path.expanduser(os.environ.get("DEBUGTRACE_TOKEN_FILE", "~/.conf
 KEY_DIR = os.path.expanduser(os.environ.get("DEBUGTRACE_KEY_DIR") or os.path.join(
     os.environ.get("XDG_STATE_HOME") or "~/.local/state", "debugtrace", "keys"))
 SERVICE_TYPE = "_debugtrace._tcp"
+CLIENT_NAME = os.environ.get("DEBUGTRACE_CLIENT_NAME") or f"An agent on {os.uname().nodename.split('.')[0]}"
 BROWSE_SECONDS = float(os.environ.get("DEBUGTRACE_BROWSE_SECONDS", "1.5"))
 PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 CALL_TIMEOUT_SECONDS = 200
@@ -341,7 +342,8 @@ def token():
 
 def request(session, path, body=None):
     url = session["url"].rstrip("/") + path
-    headers = {"Accept": "application/json"}
+    # Shown in the app's "Allow debug access?" prompt.
+    headers = {"Accept": "application/json", "X-DebugTrace-Client": CLIENT_NAME}
     value = session.get("token") or token()
     if value:
         headers["Authorization"] = f"Bearer {value}"

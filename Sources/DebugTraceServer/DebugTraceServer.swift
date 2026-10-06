@@ -77,13 +77,21 @@ public final class DebugTraceServer {
         /// without knowing its port. Only when the Info.plist declares the
         /// type in `NSBonjourServices`: iOS refuses undeclared types.
         public var advertises: Bool
+        /// Whether a client must be allowed on the device first. `.ask` by
+        /// default: the token proves the caller has this build's ledger, the
+        /// prompt that the person holding the device agrees.
+        public var approval: DebugApproval
+        /// How long a request waits for that answer before it gets a 403
+        /// saying the prompt is still open.
+        public var approvalTimeout: Duration
 
         public static let defaultPorts: ClosedRange<UInt16> = 8642...8691
 
         /// `ports: 0...0` picks any free port (tests); read it back from `start()`.
         public init(ports: ClosedRange<UInt16> = Configuration.defaultPorts, binding: Binding = .network,
                     authentication: Authentication = .automatic, maxBodyBytes: Int = 1 << 20,
-                    redactsResponses: Bool = true, allowedInRelease: Bool = false, advertises: Bool = true) {
+                    redactsResponses: Bool = true, allowedInRelease: Bool = false, advertises: Bool = true,
+                    approval: DebugApproval = .ask, approvalTimeout: Duration = .seconds(60)) {
             self.ports = ports
             self.binding = binding
             self.authentication = authentication
@@ -91,6 +99,8 @@ public final class DebugTraceServer {
             self.redactsResponses = redactsResponses
             self.allowedInRelease = allowedInRelease
             self.advertises = advertises
+            self.approval = approval
+            self.approvalTimeout = approvalTimeout
         }
     }
 
@@ -106,6 +116,7 @@ public final class DebugTraceServer {
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "DebugTraceServer")
     private lazy var mcp = MCPHandler(server: self)
+    private lazy var approvals = DebugApprovals(mode: configuration.approval)
 
     public init(surface: DebugSurface = .shared, configuration: Configuration = Configuration()) {
         self.surface = surface
@@ -339,6 +350,9 @@ public final class DebugTraceServer {
         if let failure = authenticate(request) {
             return (errorResponse(failure), nil)
         }
+        if let failure = await approve(request) {
+            return (errorResponse(failure), nil)
+        }
 
         switch path {
         case "/mcp":
@@ -442,6 +456,24 @@ public final class DebugTraceServer {
                               hint: "tokens change with every build; fetch the one for the build now installed (see _help → app.build)")
         }
         return nil
+    }
+
+    /// Nil when the person at the device has allowed this client for this launch.
+    private func approve(_ request: HTTPRequest) async -> DebugError? {
+        let client = DebugApprovals.clientName(header: request.header("x-debugtrace-client"),
+                                               userAgent: request.header("user-agent"))
+        let appName = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
+            ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "this app"
+        switch await approvals.allowed(client, appName: appName, timeout: configuration.approvalTimeout) {
+        case true?:
+            return nil
+        case false?:
+            return DebugError(.forbidden, "debug access for \"\(client)\" was declined on the device",
+                              hint: "relaunch the app to be asked again, and choose Allow")
+        case nil:
+            return DebugError(.forbidden, "waiting for someone to allow \"\(client)\" on the device",
+                              hint: "accept the prompt in the app (it must be in the foreground), then retry")
+        }
     }
 
     private func traceDownload(_ file: String) -> HTTPResponse {

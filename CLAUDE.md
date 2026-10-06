@@ -108,6 +108,17 @@ spellings of MCP's `tools/list` and `tools/call`.
   per-build `CommandToken` into the credential and into the key ledger record (mode 600), and
   `bas --mcp` passes that same token, so a session and a later attach agree. With neither,
   the server is open.
+- **Approval on the device.** After the token check, each client must be allowed in the app
+  (`Configuration.approval`, `.ask` by default): the first request from a client name
+  (`X-DebugTrace-Client`, else the User-Agent) shows "Allow debug access?" with *Allow* (this
+  launch), *Always for This Build* (remembered in UserDefaults per `CFBundleVersion`) and
+  *Don't Allow* (sticks for the launch). Concurrent requests share one prompt; a request waits
+  up to `approvalTimeout` (60 s), then gets a 403 saying the prompt is open. Help (`GET /`)
+  needs neither token nor approval. The name is the client's own label, not an identity: the
+  token is what proves the caller holds this build's ledger. `.custom` lets an app use its own
+  UI (needed when it shows no UIKit window, e.g. an immersive-only space, where `.ask` can only
+  refuse); `.allowAll` is for tests. `debugtrace-mcp` calls itself "An agent on <host>"
+  (`DEBUGTRACE_CLIENT_NAME` overrides), the appstore page "App Store page on <host>".
 - **Loopback is not exempt:** on iOS, other apps on the same device can reach 127.0.0.1.
 - **Browsers are refused.** Any non-GET request carrying `Origin` gets a 403, so a web page
   can't POST commands through the user's browser. No CORS headers are sent. The old server
