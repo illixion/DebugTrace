@@ -8,6 +8,9 @@ import Testing
 @Suite(.serialized) struct ApprovalTests {
     final class Asked: @unchecked Sendable {
         var clients: [String] = []
+        var offers = 0
+        var onScreen = 0
+        var mostOnScreen = 0
     }
 
     func serve(_ approval: DebugApproval, timeout: Duration = .seconds(5)) async throws -> (DebugTraceServer, URL) {
@@ -104,15 +107,120 @@ import Testing
         let asked = Asked()
         let mode = DebugApproval.custom { request in asked.clients.append(request.client); return .allowForBuild }
         let first = DebugApprovals(mode: mode, defaults: defaults, build: "abc1234")
-        #expect(await first.allowed("Agent", appName: "App", timeout: .seconds(1)) == true)
+        #expect(await first.allowed("Agent", appName: "App", timeout: .seconds(1)) == .allowed)
         // A relaunch of the same build: no prompt.
         let relaunch = DebugApprovals(mode: mode, defaults: defaults, build: "abc1234")
-        #expect(await relaunch.allowed("Agent", appName: "App", timeout: .seconds(1)) == true)
+        #expect(await relaunch.allowed("Agent", appName: "App", timeout: .seconds(1)) == .allowed)
         #expect(asked.clients.count == 1)
         // A new build asks again.
         let rebuilt = DebugApprovals(mode: mode, defaults: defaults, build: "def5678")
-        #expect(await rebuilt.allowed("Agent", appName: "App", timeout: .seconds(1)) == true)
+        #expect(await rebuilt.allowed("Agent", appName: "App", timeout: .seconds(1)) == .allowed)
         #expect(asked.clients.count == 2)
+    }
+
+    @Test func promptsForDifferentClientsNeverStack() async throws {
+        let asked = Asked()
+        let mode = DebugApproval.custom { request in
+            asked.clients.append(request.client)
+            asked.onScreen += 1
+            asked.mostOnScreen = max(asked.mostOnScreen, asked.onScreen)
+            try? await Task.sleep(for: .milliseconds(50))
+            asked.onScreen -= 1
+            return .allowOnce
+        }
+        let approvals = DebugApprovals(mode: mode, defaults: Self.scratchDefaults())
+        async let a = approvals.allowed("A", appName: "App", timeout: .seconds(5))
+        async let b = approvals.allowed("B", appName: "App", timeout: .seconds(5))
+        async let c = approvals.allowed("C", appName: "App", timeout: .seconds(5))
+        #expect(await [a, b, c] == [.allowed, .allowed, .allowed])
+        #expect(Set(asked.clients) == ["A", "B", "C"])
+        #expect(asked.mostOnScreen == 1)
+    }
+
+    @Test func aQueuedPromptNobodyWaitsForAnyMoreIsNeverShown() async throws {
+        let asked = Asked()
+        let gate = AsyncStream<Void>.makeStream()
+        let mode = DebugApproval.custom { request in
+            asked.clients.append(request.client)
+            if request.client == "First" { for await _ in gate.stream { break } }
+            return .deny
+        }
+        let approvals = DebugApprovals(mode: mode, defaults: Self.scratchDefaults())
+        async let first = approvals.allowed("First", appName: "App", timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(50))
+        // Queued behind First's prompt, and gives up before it is answered.
+        #expect(await approvals.allowed("Flood", appName: "App", timeout: .milliseconds(100)) == .waiting)
+        gate.continuation.yield()
+        #expect(await first == .declined)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(asked.clients == ["First"])
+    }
+
+    func declining(silences: Bool, asked: Asked) -> DebugApproval {
+        .custom({ request in
+            asked.clients.append(request.client)
+            return request.client == "Mine" ? .allowOnce : .deny
+        }, silence: { offer in
+            asked.offers += 1
+            #expect(offer.duration == .seconds(3600))
+            return silences
+        })
+    }
+
+    @Test func aSecondDeclineOffersSilenceWhichRefusesNewClientsWithoutAsking() async throws {
+        let asked = Asked()
+        let (server, base) = try await serve(declining(silences: true, asked: asked))
+        defer { server.stop() }
+        #expect(try await get(base, "/_info", client: "Mine").0 == 200)
+        #expect(try await get(base, "/_info", client: "Spam 1").0 == 403)
+        #expect(asked.offers == 0)
+        #expect(try await get(base, "/_info", client: "Spam 2").0 == 403)
+        #expect(asked.offers == 1)
+        let (status, body) = try await get(base, "/_info", client: "Spam 3")
+        #expect(status == 403)
+        #expect(body["error"]?["message"]?.stringValue?.contains("without asking") == true)
+        #expect(body["error"]?["hint"]?.stringValue?.contains("relaunch") == true)
+        #expect(asked.clients == ["Mine", "Spam 1", "Spam 2"])
+        // Already allowed: unaffected.
+        #expect(try await get(base, "/_info", client: "Mine").0 == 200)
+    }
+
+    @Test func keepAskingKeepsAskingAndOffersAgainAfterTwoMore() async throws {
+        let asked = Asked()
+        let approvals = DebugApprovals(mode: declining(silences: false, asked: asked), defaults: Self.scratchDefaults())
+        for name in ["S1", "S2", "S3"] {
+            #expect(await approvals.allowed(name, appName: "App", timeout: .seconds(5)) == .declined)
+        }
+        #expect(asked.offers == 1)
+        #expect(await approvals.allowed("S4", appName: "App", timeout: .seconds(5)) == .declined)
+        #expect(asked.offers == 2)
+        #expect(asked.clients == ["S1", "S2", "S3", "S4"])
+    }
+
+    @Test func silenceEnds() async throws {
+        let asked = Asked()
+        let mode = DebugApproval.custom({ request in asked.clients.append(request.client); return .deny },
+                                        silence: { _ in true })
+        let approvals = DebugApprovals(mode: mode, defaults: Self.scratchDefaults(), silenceDuration: .milliseconds(200))
+        _ = await approvals.allowed("S1", appName: "App", timeout: .seconds(5))
+        _ = await approvals.allowed("S2", appName: "App", timeout: .seconds(5))
+        guard case .silenced = await approvals.allowed("S3", appName: "App", timeout: .seconds(5)) else {
+            Issue.record("expected silence")
+            return
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await approvals.allowed("S3", appName: "App", timeout: .seconds(5)) == .declined)
+        #expect(asked.clients == ["S1", "S2", "S3"])
+    }
+
+    @Test func theOfferNamesItsLength() {
+        #expect(DebugSilenceOffer(appName: "A", duration: .seconds(3600)).acceptLabel == "Silence for an hour")
+        #expect(DebugSilenceOffer(appName: "A", duration: .seconds(7200)).durationText == "2 hours")
+        #expect(DebugSilenceOffer(appName: "A", duration: .seconds(900)).durationText == "15 minutes")
+    }
+
+    static func scratchDefaults() -> UserDefaults {
+        UserDefaults(suiteName: "DebugTraceApprovalTests-\(UUID().uuidString)")!
     }
 
     @Test func clientNamesAreShortAndPrintable() {

@@ -18,7 +18,7 @@ Three products:
 | Product | What | Links |
 |---|---|---|
 | `DebugTrace` | `DebugLogger` + in-process log buffer, `DebugSurface` registry, trace builder, log reader, breadcrumbs, redactor, credential | nothing |
-| `DebugTraceUI` | `DebugTraceView` / `DebugTraceButton` (capture → review → share/upload) | SwiftUI |
+| `DebugTraceUI` | `DebugTraceView` / `DebugTraceButton` (capture → review → share/upload); `DebugApprovalWindow` (the server's prompt in a window of its own) | SwiftUI |
 | `DebugTraceServer` | `DebugTraceServer`: HTTP + MCP over a surface | Network |
 
 The server is its own product so a submission build can leave it **unlinked**. The old
@@ -115,10 +115,20 @@ spellings of MCP's `tools/list` and `tools/call`.
   *Don't Allow* (sticks for the launch). Concurrent requests share one prompt; a request waits
   up to `approvalTimeout` (60 s), then gets a 403 saying the prompt is open. Help (`GET /`)
   needs neither token nor approval. The name is the client's own label, not an identity: the
-  token is what proves the caller holds this build's ledger. `.custom` lets an app use its own
-  UI (needed when it shows no UIKit window, e.g. an immersive-only space, where `.ask` can only
-  refuse); `.allowAll` is for tests. `debugtrace-mcp` calls itself "An agent on <host>"
-  (`DEBUGTRACE_CLIENT_NAME` overrides), the appstore page "App Store page on <host>".
+  token is what proves the caller holds this build's ledger, which is why a flood of made-up
+  names is handled as spam rather than authenticated away:
+  - **One prompt on screen at a time.** Prompts for different clients queue behind each other,
+    and a queued prompt whose requests have all timed out is dropped, never shown.
+  - **Silence after the second decline.** Every second *Don't Allow* is followed by "Stop
+    asking for a while?": *Silence for an hour* refuses new clients without asking (403 naming
+    the end time) until it expires or the app relaunches; clients already allowed keep working.
+    The offer takes the declined prompt's turn, so it can't stack on the next one.
+  - **The prompt's UI.** `.ask` uses a registered `DebugApprovalPresenter` first, else a system
+    alert. DebugTraceUI's `DebugApprovalWindow` scene plus `.debugApprovalPrompts()` on the
+    app's windows registers one (visionOS 26 / macOS); use it in any app that can show only an
+    immersive space, where a UIKit alert has nothing to attach to. `.custom(_:silence:)` is for
+    an app's own UI; `.allowAll` is for tests. `debugtrace-mcp` calls itself "An agent on
+    <host>" (`DEBUGTRACE_CLIENT_NAME` overrides), the appstore page "App Store page on <host>".
 - **Loopback is not exempt:** on iOS, other apps on the same device can reach 127.0.0.1.
 - **Browsers are refused.** Any non-GET request carrying `Origin` gets a 403, so a web page
   can't POST commands through the user's browser. No CORS headers are sent. The old server

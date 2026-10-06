@@ -1,3 +1,4 @@
+import DebugTrace
 import Foundation
 #if canImport(UIKit)
 import UIKit
@@ -5,96 +6,165 @@ import UIKit
 import AppKit
 #endif
 
-/// Someone on the Mac wants debug access to this app.
-public struct DebugApprovalRequest: Sendable {
-    /// What the client calls itself (`X-DebugTrace-Client`), e.g. "App Store page on Pegasus".
-    /// Clients choose it, so it is a label, not an identity: the bearer token is what proves
-    /// the caller has this build's ledger.
-    public let client: String
-    public let appName: String
-}
-
-public enum DebugApprovalDecision: Sendable {
-    /// Until the app quits.
-    case allowOnce
-    /// Every launch of this build (`CFBundleVersion`), for this client name.
-    case allowForBuild
-    case deny
-}
-
 /// Whether a client must be allowed on the device before the server answers it.
 public enum DebugApproval: Sendable {
-    /// Ask with a system alert (UIKit or AppKit) the first time each client connects.
+    /// Ask the first time each client connects: in the app's own window when
+    /// a `DebugApprovalPresenter` is registered (DebugTraceUI's
+    /// `DebugApprovalWindow`), else with a system alert (UIKit or AppKit).
     case ask
-    /// Ask with the app's own UI.
-    case custom(@MainActor @Sendable (DebugApprovalRequest) async -> DebugApprovalDecision)
+    /// Ask with the app's own UI. `silence` answers the offer made after a
+    /// second decline; without it the offer goes the `.ask` way.
+    case custom(@MainActor @Sendable (DebugApprovalRequest) async -> DebugApprovalDecision,
+                silence: (@MainActor @Sendable (DebugSilenceOffer) async -> Bool)? = nil)
     /// Never ask: tests, or an app that gates access some other way.
     case allowAll
 }
 
-/// Per-launch decisions, with one prompt per client however many requests are waiting.
+/// Per-launch decisions, defended against a flood of prompts.
+///
+/// Anyone holding the token can call itself anything, and on a hostile
+/// network the token may not be the only thing in the way (no-token servers).
+/// So: one prompt per client however many requests are waiting, one prompt on
+/// screen at a time however many clients are waiting, a queued prompt dropped
+/// once nobody waits for it, and after every second decline an offer to stop
+/// asking for an hour.
 @MainActor
 final class DebugApprovals {
+    enum Answer: Equatable {
+        case allowed
+        case declined
+        /// No prompt until then; clients already allowed are unaffected.
+        case silenced(until: Date)
+        /// The person hasn't answered within the timeout.
+        case waiting
+    }
+
+    nonisolated static let declinesBeforeOffer = 2
+
     private let mode: DebugApproval
     private let defaults: UserDefaults
     private let build: String
+    private let silenceDuration: Duration
     private var decided: [String: Bool] = [:]
-    private var pending: [String: Task<Bool, Never>] = [:]
+    private var pending: [String: Task<Answer, Never>] = [:]
+    /// Requests per client waiting on its prompt; a queued prompt whose
+    /// requests have all timed out is never shown.
+    private var waiting: [String: Int] = [:]
+    private var promptOnScreen = false
+    private var nextInLine: [CheckedContinuation<Void, Never>] = []
+    private var declinesSinceOffer = 0
+    private var silencedUntil: Date?
 
     init(mode: DebugApproval, defaults: UserDefaults = .standard,
-         build: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "") {
+         build: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
+         silenceDuration: Duration = .seconds(3600)) {
         self.mode = mode
         self.defaults = defaults
         self.build = build
+        self.silenceDuration = silenceDuration
     }
 
     private var rememberedKey: String { "DebugTrace.allowedClients.\(build)" }
 
-    /// True when `client` may be served. Waits up to `timeout` for the person
-    /// at the device; nil means they haven't answered yet.
-    func allowed(_ client: String, appName: String, timeout: Duration) async -> Bool? {
-        if case .allowAll = mode { return true }
-        if let decision = decided[client] { return decision }
+    private var silence: Date? {
+        guard let silencedUntil, silencedUntil > Date() else { return nil }
+        return silencedUntil
+    }
+
+    /// Whether `client` may be served. Waits up to `timeout` for the person at
+    /// the device, including for prompts ahead of its own.
+    func allowed(_ client: String, appName: String, timeout: Duration) async -> Answer {
+        if case .allowAll = mode { return .allowed }
+        if let decision = decided[client] { return decision ? .allowed : .declined }
         if (defaults.stringArray(forKey: rememberedKey) ?? []).contains(client) {
             decided[client] = true
-            return true
+            return .allowed
         }
+        if pending[client] == nil, let silence { return .silenced(until: silence) }
         let task = pending[client] ?? {
-            let task = Task { @MainActor [weak self] () -> Bool in
-                guard let self else { return false }
-                let request = DebugApprovalRequest(client: client, appName: appName)
-                let decision: DebugApprovalDecision
-                switch self.mode {
-                case .custom(let handler): decision = await handler(request)
-                case .ask: decision = await DebugApprovalPrompt.ask(request)
-                case .allowAll: decision = .allowOnce
-                }
-                self.pending[client] = nil
-                switch decision {
-                case .allowOnce:
-                    self.decided[client] = true
-                case .allowForBuild:
-                    self.decided[client] = true
-                    let remembered = self.defaults.stringArray(forKey: self.rememberedKey) ?? []
-                    self.defaults.set(remembered + [client], forKey: self.rememberedKey)
-                case .deny:
-                    self.decided[client] = false
-                }
-                return self.decided[client] ?? false
+            let task = Task { @MainActor [weak self] () -> Answer in
+                await self?.prompt(client, appName: appName) ?? .declined
             }
             pending[client] = task
             return task
         }()
+        waiting[client, default: 0] += 1
         // Whichever comes first. Not a task group: that would wait for the
         // prompt even after the timeout won, since the prompt task can't be
         // cancelled from here.
-        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+        let answer = await withCheckedContinuation { (continuation: CheckedContinuation<Answer, Never>) in
             let once = ResumeOnce(continuation)
             Task { @MainActor in once.resume(await task.value) }
             Task { @MainActor in
                 try? await Task.sleep(for: timeout)
-                once.resume(nil)
+                once.resume(.waiting)
             }
+        }
+        waiting[client, default: 1] -= 1
+        return answer
+    }
+
+    /// One client's turn at the screen, queued behind any prompt already up.
+    private func prompt(_ client: String, appName: String) async -> Answer {
+        await takeTurn()
+        defer { endTurn() }
+        defer { pending[client] = nil }
+        if let silence { return .silenced(until: silence) }
+        // Everyone who asked gave up while it queued: a flood of names left
+        // behind no stack of prompts. The next request asks afresh.
+        guard waiting[client, default: 0] > 0 else { return .waiting }
+        let request = DebugApprovalRequest(client: client, appName: appName)
+        let decision: DebugApprovalDecision
+        switch mode {
+        case .custom(let handler, _): decision = await handler(request)
+        case .ask: decision = await DebugApprovalPrompt.ask(request)
+        case .allowAll: decision = .allowOnce
+        }
+        switch decision {
+        case .allowOnce:
+            decided[client] = true
+        case .allowForBuild:
+            decided[client] = true
+            let remembered = defaults.stringArray(forKey: rememberedKey) ?? []
+            defaults.set(remembered + [client], forKey: rememberedKey)
+        case .deny:
+            decided[client] = false
+            declinesSinceOffer += 1
+            if declinesSinceOffer >= Self.declinesBeforeOffer {
+                declinesSinceOffer = 0
+                // Still this client's turn, so the offer can't stack on the next prompt.
+                await offerSilence(appName: appName)
+            }
+        }
+        return decided[client] == true ? .allowed : .declined
+    }
+
+    private func offerSilence(appName: String) async {
+        let offer = DebugSilenceOffer(appName: appName, duration: silenceDuration)
+        let accepted: Bool
+        if case .custom(_, let silence?) = mode {
+            accepted = await silence(offer)
+        } else {
+            accepted = await DebugApprovalPrompt.offerSilence(offer)
+        }
+        guard accepted else { return }
+        let (seconds, attoseconds) = silenceDuration.components
+        silencedUntil = Date().addingTimeInterval(Double(seconds) + Double(attoseconds) / 1e18)
+    }
+
+    private func takeTurn() async {
+        guard promptOnScreen else {
+            promptOnScreen = true
+            return
+        }
+        await withCheckedContinuation { nextInLine.append($0) }
+    }
+
+    private func endTurn() {
+        if nextInLine.isEmpty {
+            promptOnScreen = false
+        } else {
+            nextInLine.removeFirst().resume()
         }
     }
 
@@ -110,43 +180,60 @@ final class DebugApprovals {
 
 @MainActor
 private final class ResumeOnce {
-    private var continuation: CheckedContinuation<Bool?, Never>?
-    init(_ continuation: CheckedContinuation<Bool?, Never>) { self.continuation = continuation }
-    func resume(_ value: Bool?) {
+    private var continuation: CheckedContinuation<DebugApprovals.Answer, Never>?
+    init(_ continuation: CheckedContinuation<DebugApprovals.Answer, Never>) { self.continuation = continuation }
+    func resume(_ value: DebugApprovals.Answer) {
         continuation?.resume(returning: value)
         continuation = nil
     }
 }
 
-/// The default prompt: a system alert over whatever is on screen.
+/// The default prompt: the registered presenter's window, else a system alert
+/// over whatever is on screen.
 @MainActor
 enum DebugApprovalPrompt {
     static func ask(_ request: DebugApprovalRequest) async -> DebugApprovalDecision {
+        if let presenter = DebugApprovalPresenter.current, let decision = await presenter.ask(request) {
+            return decision
+        }
         let title = "Allow debug access?"
         let message = "\(request.client) wants to read \(request.appName)'s logs and run its debug commands."
+        return await alert(title: title, message: message, buttons: [
+            ("Allow", .allowOnce), ("Always for This Build", .allowForBuild),
+        ], cancel: ("Don't Allow", .deny))
+    }
+
+    static func offerSilence(_ offer: DebugSilenceOffer) async -> Bool {
+        if let presenter = DebugApprovalPresenter.current, let accepted = await presenter.offerSilence(offer) {
+            return accepted
+        }
+        return await alert(title: DebugSilenceOffer.title, message: offer.message,
+                           buttons: [(offer.acceptLabel, true)], cancel: ("Keep Asking", false))
+    }
+
+    /// Nothing to present on (no UIKit window, as in an immersive-only space)
+    /// answers with `cancel`.
+    private static func alert<T: Sendable>(title: String, message: String, buttons: [(String, T)], cancel: (String, T)) async -> T {
         #if canImport(UIKit)
-        guard let presenter = topViewController() else { return .deny }
+        guard let presenter = topViewController() else { return cancel.1 }
         return await withCheckedContinuation { continuation in
             let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Allow", style: .default) { _ in continuation.resume(returning: .allowOnce) })
-            alert.addAction(UIAlertAction(title: "Always for This Build", style: .default) { _ in continuation.resume(returning: .allowForBuild) })
-            alert.addAction(UIAlertAction(title: "Don't Allow", style: .cancel) { _ in continuation.resume(returning: .deny) })
+            for (label, value) in buttons {
+                alert.addAction(UIAlertAction(title: label, style: .default) { _ in continuation.resume(returning: value) })
+            }
+            alert.addAction(UIAlertAction(title: cancel.0, style: .cancel) { _ in continuation.resume(returning: cancel.1) })
             presenter.present(alert, animated: true)
         }
         #elseif canImport(AppKit)
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.addButton(withTitle: "Allow")
-        alert.addButton(withTitle: "Always for This Build")
-        alert.addButton(withTitle: "Don't Allow")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: return .allowOnce
-        case .alertSecondButtonReturn: return .allowForBuild
-        default: return .deny
-        }
+        for (label, _) in buttons { alert.addButton(withTitle: label) }
+        alert.addButton(withTitle: cancel.0)
+        let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        return index >= 0 && index < buttons.count ? buttons[index].1 : cancel.1
         #else
-        return .deny
+        return cancel.1
         #endif
     }
 

@@ -494,12 +494,15 @@ public final class DebugTraceServer {
         let appName = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
             ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "this app"
         switch await approvals.allowed(client, appName: appName, timeout: configuration.approvalTimeout) {
-        case true?:
+        case .allowed:
             return nil
-        case false?:
+        case .declined:
             return DebugError(.forbidden, "debug access for \"\(client)\" was declined on the device",
                               hint: "relaunch the app to be asked again, and choose Allow")
-        case nil:
+        case .silenced(let until):
+            return DebugError(.forbidden, "the device is refusing new debug clients without asking, until \(DebugTime.iso(until))",
+                              hint: "after declining requests, the person at the device silenced the prompt; relaunch the app to be asked again")
+        case .waiting:
             return DebugError(.forbidden, "waiting for someone to allow \"\(client)\" on the device",
                               hint: "accept the prompt in the app (it must be in the foreground), then retry")
         }
