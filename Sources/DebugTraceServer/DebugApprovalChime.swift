@@ -9,7 +9,8 @@ import AudioToolbox
 ///
 /// Synthesized rather than a system sound id or a bundled file: ids differ
 /// between platforms and OS releases, and a package that ships no resources
-/// has nothing to forget to copy. A rising two-note chime.
+/// has nothing to forget to copy. A descending three-note mallet tone, kept clear of any
+/// well-known device or console jingle.
 ///
 /// It is played as a system alert sound (`AudioServices`), not through
 /// `AVAudioPlayer`: an audio player activates the app's audio session, which
@@ -48,20 +49,24 @@ enum DebugApprovalChime {
         }
     }
 
-    /// 16-bit mono PCM: 988 Hz then 1319 Hz (B5, E6), each with a short
-    /// attack and a long decay so it rings rather than clicks.
+    /// 16-bit mono PCM: a descending triplet (A5, F5, D5) in a struck-bar timbre:
+    /// inharmonic upper partials that die away faster than the fundamental,
+    /// with a short attack and a long ring on the last note.
     nonisolated static let wav: Data = {
         let rate = 44_100
-        let notes: [(frequency: Double, seconds: Double)] = [(987.77, 0.16), (1318.51, 0.42)]
+        let notes: [(frequency: Double, seconds: Double)] = [(880.00, 0.15), (698.46, 0.15), (587.33, 0.55)]
         var samples: [Int16] = []
         for note in notes {
             let count = Int(Double(rate) * note.seconds)
             for i in 0..<count {
                 let t = Double(i) / Double(rate)
-                let attack = min(1, t / 0.008)
-                let decay = exp(-5 * t / note.seconds)
-                let tone = sin(2 * .pi * note.frequency * t) + 0.3 * sin(4 * .pi * note.frequency * t)
-                samples.append(Int16(max(-1, min(1, 0.45 * attack * decay * tone)) * Double(Int16.max)))
+                let attack = min(1, t / 0.004)
+                let body = exp(-4 * t / note.seconds)
+                let bright = exp(-14 * t / note.seconds)
+                let tone = sin(2 * .pi * note.frequency * t)
+                    + 0.5 * bright * sin(2 * .pi * note.frequency * 2.76 * t)
+                    + 0.25 * bright * sin(2 * .pi * note.frequency * 5.4 * t)
+                samples.append(Int16(max(-1, min(1, 0.5 * attack * body * tone)) * Double(Int16.max)))
             }
         }
         func le<T: FixedWidthInteger>(_ value: T) -> [UInt8] { withUnsafeBytes(of: value.littleEndian) { Array($0) } }
