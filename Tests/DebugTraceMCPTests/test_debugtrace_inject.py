@@ -65,6 +65,20 @@ class CompileCommandTests(unittest.TestCase):
         self.assertEqual(caches, ["/cache/ModuleCache.noindex"])
 
 
+class RunSnippetTests(unittest.TestCase):
+    def test_leading_imports_are_hoisted_out_of_the_function_body(self):
+        source = inject.run_source("App", "import DebugTrace\n@testable import Other\nlet x = 2\nreturn x")
+        body = source.split("func __debugtraceRun() -> Any {")[1]
+        self.assertNotIn("import", body)
+        self.assertIn("import DebugTrace", source.split("func __debugtraceRun")[0])
+        self.assertIn("@testable import Other", source.split("func __debugtraceRun")[0])
+        self.assertIn("return x", body)
+
+    def test_a_snippet_without_imports_is_unchanged(self):
+        source = inject.run_source("App", "return 1 + 1")
+        self.assertIn("{\nreturn 1 + 1\n}", source)
+
+
 class InjectToolTests(unittest.TestCase):
     """The agent-facing tool, with the helper and the app replaced."""
 

@@ -223,9 +223,19 @@ def compile_patch(state, module, sources, label, work):
 
 
 def run_source(module, snippet):
+    # `import` is only legal at file scope, and a model starts a snippet with one
+    # as often as not: hoist the leading import lines out of the function body.
+    lines = snippet.splitlines()
+    hoisted = []
+    while lines and (not lines[0].strip() or re.match(r"\s*(@testable\s+)?import\s+\w", lines[0])):
+        if lines[0].strip():
+            hoisted.append(lines[0].strip())
+        lines.pop(0)
+    snippet = "\n".join(lines)
     return (
         "import Foundation\n"
-        f"@testable import {module}\n\n"
+        + "".join(f"{line}\n" for line in hoisted)
+        + f"@testable import {module}\n\n"
         '@_cdecl("debugtrace_patch_entry")\n'
         "nonisolated public func debugtrace_patch_entry() -> UnsafeMutablePointer<CChar>? {\n"
         "    MainActor.assumeIsolated { strdup(\"\\(__debugtraceRun())\") }\n"
