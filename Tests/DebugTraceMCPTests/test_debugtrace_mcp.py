@@ -243,3 +243,33 @@ class Discovery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolveAcrossDevices(unittest.TestCase):
+    SESSIONS = [
+        {"appName": "Convolution", "bundleId": "com.illixion.spatialstash", "device": "ixPhone"},
+        {"appName": "Hypnos", "bundleId": "com.illixion.spatialstash", "device": "AVP"},
+        {"appName": "xrTimer", "bundleId": "com.illixion.worldcast.xrTimer", "device": "AVP"},
+    ]
+
+    def setUp(self):
+        self.saved = mcp.live_sessions
+        mcp.live_sessions = lambda: [dict(s) for s in self.SESSIONS]
+
+    def tearDown(self):
+        mcp.live_sessions = self.saved
+
+    def test_same_bundle_on_two_devices_names_the_qualified_forms(self):
+        with self.assertRaises(mcp.ToolError) as caught:
+            mcp.resolve("com.illixion.spatialstash")
+        self.assertIn("com.illixion.spatialstash@AVP", caught.exception.hint)
+        self.assertIn("com.illixion.spatialstash@ixPhone", caught.exception.hint)
+
+    def test_device_suffix_picks_one(self):
+        self.assertEqual(mcp.resolve("com.illixion.spatialstash@ixphone")["device"], "ixPhone")
+        self.assertEqual(mcp.resolve("Hypnos@AVP")["device"], "AVP")
+
+    def test_unknown_device_lists_the_known_ones(self):
+        with self.assertRaises(mcp.ToolError) as caught:
+            mcp.resolve("xrTimer@ATV")
+        self.assertIn("AVP", caught.exception.hint)

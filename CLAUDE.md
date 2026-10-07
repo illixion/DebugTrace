@@ -58,7 +58,8 @@ xcodebuild -scheme DebugTrace-Package -sdk appletvos -destination 'generic/platf
 `python3 -m unittest discover -s Tests/DebugTraceMCPTests` tests `Tools/debugtrace-mcp`.
 
 `Tools/debugtrace-mcp` forgives the guesses a model makes: `args`/`params`/`input` for
-`arguments`, `name` for `endpoint`, `bundleId` for `app`, a JSON-string `arguments`, and an
+`arguments`, `name` for `endpoint`, `bundleId` for `app` (and `app@device`, e.g. `com.illixion.spatialstash@ixPhone`, when
+the same app runs on two devices), a JSON-string `arguments`, and an
 endpoint's arguments flattened next to `endpoint`. It says in the reply which it accepted, and
 rejects any other name with a did-you-mean and the valid list. Keep that when adding a tool: a
 silently ignored parameter runs a command with its defaults.

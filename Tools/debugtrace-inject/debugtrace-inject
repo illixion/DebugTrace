@@ -238,7 +238,10 @@ def run_source(module, snippet):
         + f"@testable import {module}\n\n"
         '@_cdecl("debugtrace_patch_entry")\n'
         "nonisolated public func debugtrace_patch_entry() -> UnsafeMutablePointer<CChar>? {\n"
-        "    MainActor.assumeIsolated { strdup(\"\\(__debugtraceRun())\") }\n"
+        # The String crosses the isolation boundary, not the pointer: Swift 6
+        # refuses a non-Sendable result from assumeIsolated.
+        "    let text = MainActor.assumeIsolated { \"\\(__debugtraceRun())\" }\n"
+        "    return strdup(text)\n"
         "}\n\n"
         "@MainActor func __debugtraceRun() -> Any {\n"
         f"{snippet}\n"

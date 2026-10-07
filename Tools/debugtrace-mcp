@@ -82,7 +82,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "app": {"type": "string", "description": "app name or bundle id, with @device when it runs on several (Hypnos@ixPhone); optional when only one app is running"},
                 "endpoint": {"type": "string", "description": "one endpoint's name"},
             },
             "additionalProperties": False,
@@ -95,7 +95,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "app": {"type": "string", "description": "app name or bundle id, with @device when it runs on several (Hypnos@ixPhone); optional when only one app is running"},
                 "endpoint": {"type": "string", "description": "endpoint name, e.g. _info or state"},
                 "arguments": {"type": "object", "description": "the endpoint's arguments, by name"},
             },
@@ -110,7 +110,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "app": {"type": "string", "description": "app name or bundle id, with @device when it runs on several (Hypnos@ixPhone); optional when only one app is running"},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "source files to inject, absolute or relative to the project root; default: every file that differs from what the app is running"},
                 "run": {"type": "string", "description": "Swift function body to evaluate after patching; must return a value, e.g. `return player.position`"},
             },
@@ -124,7 +124,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "app": {"type": "string", "description": "app name or bundle id, with @device when it runs on several (Hypnos@ixPhone); optional when only one app is running"},
                 "note": {"type": "string", "description": "what was being investigated; stored as note.txt"},
                 "logMinutes": {"type": "integer", "minimum": 1, "maximum": 1440, "description": "minutes of log history to include (default 30)"},
             },
@@ -373,6 +373,16 @@ def resolve(app):
         names = ", ".join(s.get("appName") or s.get("bundleId") for s in sessions)
         raise ToolError(f"{len(sessions)} apps are running ({names})", "pass `app` with one of those names")
     wanted = app.strip().lower()
+    # "Hypnos@ixPhone": the same app can run on several devices at once.
+    device = None
+    if "@" in wanted:
+        wanted, device = (part.strip() for part in wanted.rsplit("@", 1))
+        on_device = [s for s in sessions if (s.get("device") or "").lower() == device]
+        if not on_device:
+            devices = sorted({s.get("device") for s in sessions if s.get("device")})
+            raise ToolError(f"no running app is on a device named '{device}'",
+                            f"devices with apps running: {', '.join(devices) or 'none'}")
+        sessions = on_device
 
     def keys(session):
         bundle = (session.get("bundleId") or "").lower()
@@ -384,6 +394,12 @@ def resolve(app):
         return matches[0]
     names = ", ".join(s.get("appName") or s.get("bundleId") for s in (matches or sessions))
     if matches:
+        devices = sorted({m.get("device") for m in matches if m.get("device")})
+        bundles = {m.get("bundleId") for m in matches}
+        if len(bundles) == 1 and len(devices) > 1:
+            bundle = matches[0].get("bundleId")
+            raise ToolError(f"'{app}' is running on several devices ({', '.join(devices)})",
+                            "add the device: " + " or ".join(f"{bundle}@{d}" for d in devices))
         raise ToolError(f"'{app}' matches several running apps ({names})", "pass the full bundle id")
     raise ToolError(f"no running app matches '{app}'", f"running now: {names}; call `apps` for details")
 
