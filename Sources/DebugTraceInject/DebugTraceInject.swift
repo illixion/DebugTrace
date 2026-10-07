@@ -121,6 +121,8 @@ public enum DebugTraceInject {
         loaded.append(patch)
         generation += 1
         onLoad?(patch)
+        // DebugTraceUI's `@PatchRefresh` and friends listen by name: the runtime is embedded, not linked.
+        NotificationCenter.default.post(name: Notification.Name("com.illixion.debugtrace.patchLoaded"), object: nil)
         return LoadReply(loaded: patch, generation: generation, output: output, patchCount: loaded.count)
     }
 

@@ -342,8 +342,7 @@ environment) applies the flags to the app's own module only, via a `$(DTINJECT_F
 macro that is empty for package targets: packages stay fully optimized and cost half as much in
 Oneiros (+11-15%), but their code can't be patched, and `inject` refuses such a file with a hint
 (`capture --scope` records which). A patch compiles per module, with that module's flags, so changes in several packages are
-several dylibs. Not yet checked: SwiftUI view refresh after a patch (`DebugTraceInject.generation`
-is there for `.id(...)`), generics-heavy code, iOS.
+several dylibs. SwiftUI does not re-run a patched `body` until an input of that view changes (a tab switch does). `DebugTraceUI` has three opt-ins, nothing automatic (`DebugPatchRefresh.swift`; the runtime posts a notification after each load, the UI listens by name): `@PatchRefresh var x` inside the view being patched (its `body` re-runs, `@State` kept; children re-run only if their inputs changed), `.rebuildsOnPatch()` (subtree rebuilt, `@State` lost), `.reopensWindowOnPatch(id)` (opens a copy of the `WindowGroup(id:)` and closes this one; for apps with no tabs). All no-ops without a patch. Not yet checked on a device: those three; generics-heavy code, iOS.
 
 **Gotchas found building it**, so they are not rediscovered: without `-enable-testing` the
 replaceable functions are `hidden` and loading fails with "symbol not found in flat namespace
