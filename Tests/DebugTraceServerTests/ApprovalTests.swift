@@ -280,8 +280,8 @@ import Testing
 
 @MainActor
 struct ApprovalChimeTests {
-    @Test func theChimeIsAValidWavFile() throws {
-        let wav = DebugApprovalChime.wav
+    @Test(arguments: [DebugApprovalChime.Kind.access, .codePatching]) func theChimeIsAValidWavFile(kind: DebugApprovalChime.Kind) throws {
+        let wav = DebugApprovalChime.wav(kind)
         #expect(String(decoding: wav.prefix(4), as: UTF8.self) == "RIFF")
         #expect(String(decoding: wav[8..<16], as: UTF8.self) == "WAVEfmt ")
         let declared = wav[40..<44].enumerated().reduce(0) { $0 | Int($1.element) << (8 * $1.offset) }
@@ -289,6 +289,10 @@ struct ApprovalChimeTests {
         // Under a second: it rings, it doesn't talk over the prompt.
         #expect(declared / 2 < 44_100)
         #expect(wav.dropFirst(44).contains { $0 != 0 })
+    }
+
+    @Test func codeChangesSoundUnlikeAccess() {
+        #expect(DebugApprovalChime.wav(.access) != DebugApprovalChime.wav(.codePatching))
     }
 
     @Test func soundIsOnByDefaultForTheServer() {

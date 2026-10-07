@@ -122,7 +122,7 @@ final class DebugApprovals {
         guard waiting[client, default: 0] > 0 else { return .waiting }
         let request = DebugApprovalRequest(client: name, appName: appName, purpose: purpose)
         let decision: DebugApprovalDecision
-        let chime = chimeWhilePrompting()
+        let chime = chimeWhilePrompting(DebugApprovalChime.Kind(purpose))
         defer { chime?.cancel() }
         switch mode {
         case .custom(let handler, _): decision = await handler(request)
@@ -168,8 +168,8 @@ final class DebugApprovals {
 
     /// Starts the chime for a prompt about to be shown; the caller cancels it
     /// once the person has answered. Nil when sound is off.
-    private func chimeWhilePrompting() -> Task<Void, Never>? {
-        playsSound ? DebugApprovalChime.start() : nil
+    private func chimeWhilePrompting(_ kind: DebugApprovalChime.Kind = .access) -> Task<Void, Never>? {
+        playsSound ? DebugApprovalChime.start(kind) : nil
     }
 
     private func takeTurn() async {

@@ -324,7 +324,7 @@ no compile command for an up-to-date module, so `capture` keeps what an earlier 
 (`rm -rf build/DerivedData` if the record is missing).
 
 **The approval prompt chimes** (`Configuration.approvalSound`, default on): it is easy to miss on a
-headset, so it plays a three-note descending mallet chime when shown and every 8 s while unanswered. It is an
+headset, so it plays a three-note descending mallet chime when shown (the code-changes prompt instead plays two sharp 1568 Hz pulses, xrTimer's interval beep, so it is told apart by ear) and every 8 s while unanswered. It is an
 `AudioServices` alert sound: an `AVAudioPlayer` activates the app's audio session and **pauses
 music in other apps** (seen on the Vision Pro, even with `mixWithOthers`); an alert sound only
 ducks it.

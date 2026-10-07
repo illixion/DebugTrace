@@ -1,3 +1,4 @@
+import DebugTrace
 import Foundation
 #if canImport(AudioToolbox)
 import AudioToolbox
@@ -22,32 +23,68 @@ enum DebugApprovalChime {
     /// How long a prompt sits unanswered before it chimes again.
     nonisolated static let repeatInterval: Duration = .seconds(8)
 
+    /// Which question is being asked. Code changes sound unlike access, so the
+    /// person can tell by ear that something wants to run code.
+    enum Kind: Hashable {
+        case access
+        case codePatching
+
+        init(_ purpose: DebugApprovalRequest.Purpose) {
+            self = purpose == .access ? .access : .codePatching
+        }
+    }
+
     #if canImport(AudioToolbox)
-    private static var soundID: SystemSoundID?
+    private static var soundIDs: [Kind: SystemSoundID] = [:]
     #endif
 
-    static func play() {
+    static func play(_ kind: Kind = .access) {
         #if canImport(AudioToolbox)
-        if soundID == nil {
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("debugtrace-approval-chime.wav")
-            guard (try? wav.write(to: url, options: .atomic)) != nil else { return }
+        if soundIDs[kind] == nil {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("debugtrace-approval-\(kind).wav")
+            guard (try? wav(kind).write(to: url, options: .atomic)) != nil else { return }
             var id: SystemSoundID = 0
             guard AudioServicesCreateSystemSoundID(url as CFURL, &id) == kAudioServicesNoError else { return }
-            soundID = id
+            soundIDs[kind] = id
         }
-        if let soundID { AudioServicesPlayAlertSound(soundID) }
+        if let id = soundIDs[kind] { AudioServicesPlayAlertSound(id) }
         #endif
     }
 
     /// Chimes now and every `repeatInterval` until the returned task is cancelled.
-    static func start() -> Task<Void, Never> {
+    static func start(_ kind: Kind = .access) -> Task<Void, Never> {
         Task { @MainActor in
             while !Task.isCancelled {
-                play()
+                play(kind)
                 try? await Task.sleep(for: repeatInterval)
             }
         }
     }
+
+    nonisolated static func wav(_ kind: Kind) -> Data {
+        kind == .access ? wav : pulses
+    }
+
+    /// 16-bit mono PCM, two sharp 1568 Hz (G6) pulses with a quick attack and a
+    /// short decay: the same shape as xrTimer's interval beep, which cuts
+    /// through music and is nothing like the access chime.
+    nonisolated static let pulses: Data = {
+        let rate = 44_100.0
+        let pulseSeconds = 0.09, gapSeconds = 0.07, hz = 1568.0
+        var samples: [Int16] = []
+        func pulse() {
+            for i in 0..<Int(rate * pulseSeconds) {
+                let t = Double(i) / rate
+                let envelope = min(1, t / 0.004) * exp(-3 * t / pulseSeconds)
+                let tone = sin(2 * .pi * hz * t) + 0.25 * sin(6 * .pi * hz * t)
+                samples.append(Int16(max(-1, min(1, 0.9 * envelope * tone / 1.25)) * Double(Int16.max)))
+            }
+        }
+        pulse()
+        samples += [Int16](repeating: 0, count: Int(rate * gapSeconds))
+        pulse()
+        return wavFile(samples, rate: Int(rate))
+    }()
 
     /// 16-bit mono PCM: a descending triplet (A5, F5, D5) in a struck-bar timbre:
     /// inharmonic upper partials that die away faster than the fundamental,
@@ -69,6 +106,10 @@ enum DebugApprovalChime {
                 samples.append(Int16(max(-1, min(1, 0.5 * attack * body * tone)) * Double(Int16.max)))
             }
         }
+        return wavFile(samples, rate: rate)
+    }()
+
+    nonisolated private static func wavFile(_ samples: [Int16], rate: Int) -> Data {
         func le<T: FixedWidthInteger>(_ value: T) -> [UInt8] { withUnsafeBytes(of: value.littleEndian) { Array($0) } }
         let dataBytes = samples.count * 2
         var out = Data()
@@ -77,5 +118,5 @@ enum DebugApprovalChime {
         out += Array("data".utf8) + le(UInt32(dataBytes))
         for sample in samples { out += le(sample) }
         return out
-    }()
+    }
 }
