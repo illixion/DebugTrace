@@ -286,3 +286,16 @@ class RewriterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Scope(unittest.TestCase):
+    def test_only_modules_built_for_dynamic_replacement_are_patchable(self):
+        self.assertTrue(inject.replaceable({"args": ["-O", "-Xfrontend", "-enable-implicit-dynamic"]}))
+        self.assertFalse(inject.replaceable({"args": ["-O", "-enable-testing"]}))
+
+    def test_app_scope_patches_only_the_app_module(self):
+        state = {"scope": "app", "appModule": "Game"}
+        dynamic = {"args": ["-Xfrontend", "-enable-implicit-dynamic"]}
+        self.assertTrue(inject.replaceable(dynamic, "Game", state))
+        # A package whose record is left over from an all-scope build.
+        self.assertFalse(inject.replaceable(dynamic, "VoxelRender", state))

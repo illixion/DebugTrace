@@ -326,9 +326,13 @@ App Store build, has no such file. Layers of opt-out: don't pass `--inject`;
 `register()` still works for an app that wants it compiled in. `--inject` also sets
 `DEAD_CODE_STRIPPING=NO`. Verified on the real xrTimer (28 s build+deploy, no source change).
 
-**Costs to know.** Implicit-dynamic makes every call to a replaceable function indirect, so an
-`--inject` build is not the shipping binary's performance (frame-budget apps: measure with a normal
-build). A patch compiles per module, with that module's flags, so changes in several packages are
+**Costs to know.** Implicit-dynamic makes every call to a replaceable function indirect and blocks
+inlining, so an `--inject` build is not the shipping binary's performance: Oneiros spent 28-35% more
+CPU in its frame work (measure with a normal build). `INJECT_SCOPE=app` (a repo conf, or the
+environment) applies the flags to the app's own module only, via a `$(DTINJECT_FLAGS_$(WRAPPER_EXTENSION))`
+macro that is empty for package targets: packages stay fully optimized and cost half as much in
+Oneiros (+11-15%), but their code can't be patched, and `inject` refuses such a file with a hint
+(`capture --scope` records which). A patch compiles per module, with that module's flags, so changes in several packages are
 several dylibs. Not yet checked: SwiftUI view refresh after a patch (`DebugTraceInject.generation`
 is there for `.id(...)`), generics-heavy code, iOS.
 

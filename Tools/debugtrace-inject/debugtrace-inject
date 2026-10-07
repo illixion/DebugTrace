@@ -133,6 +133,10 @@ def command_capture(options):
         state["appModule"] = options.app_module
     elif "appModule" not in state:
         state["appModule"] = (commands[-1][0] if commands else next(iter(state["modules"])))
+    # Which modules this build made replaceable. An up-to-date module keeps
+    # the arguments an earlier build recorded, which may be from a build with
+    # another scope, so its arguments alone can't say.
+    state["scope"] = options.scope
     state["products"] = options.products
     state["root"] = options.root
     for sub in ("build", "live"):
@@ -257,6 +261,12 @@ def sign(files, root):
                       "~/.config/build-signing/global.conf)", detail=tail)
 
 
+def replaceable(module_record, name=None, state=None):
+    if state is not None and state.get("scope") == "app" and name != state.get("appModule"):
+        return False
+    return any(a == "-enable-implicit-dynamic" for a in module_record["args"])
+
+
 def command_patch(options):
     state = load_state(options.dir)
     root = state["root"]
@@ -279,6 +289,17 @@ def command_patch(options):
     if not changed and not options.run:
         say(ok=True, changed=[], note="no file differs from what the running app has; nothing to inject")
         return
+
+    # Only modules built with implicit dynamic replacement can be patched:
+    # INJECT_SCOPE=app builds the app's own module that way and leaves its
+    # packages fully optimized.
+    fixed = sorted({where[p] for p in changed if not replaceable(state["modules"][where[p]], where[p], state)})
+    if fixed:
+        raise Failure(
+            f"{', '.join(fixed)} was built without live patching, so its code cannot be replaced",
+            "this build patches only the app's own module (INJECT_SCOPE=app); to patch package code, rebuild "
+            "with INJECT_SCOPE=all build-and-sign --mcp --inject, or move the change into the app",
+            rebuildNeeded=True, modules=fixed)
 
     work = tempfile.mkdtemp(prefix="debugtrace-inject-")
     tool = rewriter()
@@ -371,6 +392,7 @@ def main():
     capture.add_argument("--root", required=True)
     capture.add_argument("--app-module", default="")
     capture.add_argument("--products", required=True)
+    capture.add_argument("--scope", choices=["all", "app"], default="all")
     patch = sub.add_parser("patch")
     patch.add_argument("--dir", required=True)
     patch.add_argument("--file", action="append")
