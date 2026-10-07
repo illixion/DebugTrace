@@ -144,7 +144,7 @@ DebugSurface.shared.register([
 ])
 ```
 
-Rules that keep the API usable by a model are in [endpoints.md](endpoints.md): camelCase
+If an endpoint returns the screen, add `sensitivity: .screenCapture` to it. Rules that keep the API usable by a model are in [endpoints.md](endpoints.md): camelCase
 names, a unit in every key, a `hint` on every error, commands return the resulting state.
 Register from `@MainActor` code, once, after the models exist. Queries whose arguments all
 have defaults are added to every trace.

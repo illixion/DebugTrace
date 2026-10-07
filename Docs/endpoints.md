@@ -52,6 +52,9 @@ confidential profile refuses it). Unnamed threads are listed as `unnamed thread 
 over HTTP download from `GET /_traces/<id>.zip`. `_tools` and `_call` are plain-HTTP
 spellings of MCP's `tools/list` and `tools/call`.
 
+An endpoint that returns the screen (a frame grab, a view dump) declares `sensitivity: .screenCapture` so the
+server asks the person first ([inspecting-a-running-app.md](inspecting-a-running-app.md#immersive-spaces-and-other-frames-the-app-grabs-itself)).
+
 When adding an endpoint, mark it `releaseSafe` only if its data has no personal content:
 versions, counts, modes, health, error states. File names, URLs, account names, message
 text and locations are personal.

@@ -52,6 +52,7 @@ manage. Worktrees of Apple apps go through `apple-worktree`, as everywhere under
 - **Omitting `DebugApprovalWindow()` on visionOS.** The server then falls back to a system
   alert that 3D content can hide, and an immersive-only app never shows it. The symptom is
   every call replying "waiting for approval".
+- **Leaving an app's own screenshot/frame-grab endpoint without `sensitivity: .screenCapture`.** It is then served on debug access alone, with no prompt.
 - **Registering endpoints off the main actor** or before the models exist.
 - **Marking an endpoint `releaseSafe` to make a trace complete.** It ships to users.
 - **Leaving `print`/`NSLog`** in app code and then finding `_logs` empty.

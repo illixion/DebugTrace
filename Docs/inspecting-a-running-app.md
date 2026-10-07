@@ -37,6 +37,24 @@ they sit, which is usually enough to find the odd one. On a Vision Pro it listed
 elements ("No Timers", the "New Timer" button) with frames. A view with no accessibility content
 (decoration, an unlabelled image) is absent: pair it with `_screenshot`.
 
+## Immersive spaces and other frames the app grabs itself
+
+A window capture cannot see what a renderer composites itself, and an immersive-only app has no window.
+Such an app already has its own frame grab (Oneiros and LambdaVision each register a `screenshot` endpoint
+that reads the Metal drawable). **Declare it as showing the screen** so the server asks like it does for
+`_screenshot`:
+
+```swift
+.raw("screenshot", kind: .query, "PNG of the next rendered frame", trace: .never,
+     sensitivity: .screenCapture) { args in ... }
+```
+
+`sensitivity: .screenCapture` makes the server ask the person at the device for each call (or once for
+15 minutes, shared with `_screenshot` and `_screen`), keeps the endpoint out of every trace, and forces
+`releaseSafe` off. Do this for **every** endpoint that returns pixels or text of the screen; without it
+the endpoint is served on debug access alone. In an immersive-only app the prompt appears in the
+`DebugApprovalWindow` panel in front of the person ([integration.md](integration.md#2-start-it-at-launch)).
+
 ## The prompt
 
 Showing the screen needs the person at the device, like patching, but asked a little differently:
