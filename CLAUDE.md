@@ -142,8 +142,10 @@ spellings of MCP's `tools/list` and `tools/call`.
     The offer takes the declined prompt's turn, so it can't stack on the next one.
   - **The prompt's UI.** `.ask` uses a registered `DebugApprovalPresenter` first, else a system
     alert. DebugTraceUI's `DebugApprovalWindow` scene plus `.debugApprovalPrompts()` on the
-    app's windows registers one (visionOS 26 / macOS 15); use it in any app that can show only an
-    immersive space, where a UIKit alert has nothing to attach to. `.custom(_:silence:)` is for
+    app's windows registers one (visionOS 26 / macOS 15); use it in **every visionOS app** (all of the
+    portfolio's do, as of 2026-10-07): it opens as a utility panel in front of the person, while a UIKit
+    alert attaches to the frontmost window, where 3D content (Hypnos's 3D player) hides it, and an
+    immersive-only app has no window for it at all. `.custom(_:silence:)` is for
     an app's own UI; `.allowAll` is for tests. `debugtrace-mcp` calls itself "An agent on
     <host>" (`DEBUGTRACE_CLIENT_NAME` overrides), the appstore page "App Store page on <host>".
 - **Loopback is not exempt:** on iOS, other apps on the same device can reach 127.0.0.1.
