@@ -163,6 +163,48 @@ class InjectToolTests(unittest.TestCase):
         self.assertIn("loadMs", body["timings"])
         self.assertEqual([c[0] for c in self.helper_calls][-1], "commit")
 
+    def test_a_patch_too_big_for_the_request_is_deflated_and_sizes_itself(self):
+        import base64, zlib, random
+        # Incompressible bytes would not fit; mangled-name-like text does, as in a real SwiftUI patch.
+        names = b"$s7SwiftUI4ViewPAAE" + b"7HypnosV13SettingsTabViewV" * 120_000
+        path = os.path.join(tempfile.mkdtemp(), "big.dylib")
+        with open(path, "wb") as handle:
+            handle.write(names)
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        plan = {"ok": True, "dylibs": [{"module": "Game", "path": path, "label": "Game: S.swift"}], "commit": []}
+        self.wire([{"label": "x"}], plan)
+        result, body = self.call({})
+        self.assertFalse(result.get("isError", False), body)
+        _, arguments = next(c for c in self.app_calls if c[0] == "_inject")
+        self.assertEqual(arguments["encoding"], "deflate")
+        self.assertEqual(arguments["bytes"], len(names))
+        self.assertEqual(zlib.decompress(base64.b64decode(arguments["patch"]), -15), names)
+        self.assertLess(len(arguments["patch"]), mcp.MAX_PATCH_BASE64)
+
+    def test_a_small_patch_is_never_deflated_so_an_older_runtime_still_takes_it(self):
+        path = os.path.join(tempfile.mkdtemp(), "p.dylib")
+        with open(path, "wb") as handle:
+            handle.write(b"small")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        self.wire([{"label": "x"}], {"ok": True, "dylibs": [{"module": "G", "path": path, "label": "G"}], "commit": []})
+        self.call({})
+        _, arguments = next(c for c in self.app_calls if c[0] == "_inject")
+        self.assertNotIn("encoding", arguments)
+
+    def test_an_old_runtime_refusing_encoding_is_told_to_relaunch(self):
+        import random
+        path = os.path.join(tempfile.mkdtemp(), "big.dylib")
+        with open(path, "wb") as handle:
+            handle.write(b"abcdefgh" * 400_000)
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        self.wire([{"label": "x"}], {"ok": True, "dylibs": [{"module": "G", "path": path, "label": "G"}], "commit": []})
+        mcp.app_call = lambda session, name, arguments: (
+            (200, {"ok": True, "data": {"patches": [{"label": "x"}]}}) if name == "_patches"
+            else (400, {"ok": False, "error": {"code": "invalid_argument", "message": "unknown parameter 'encoding'"}}))
+        result, _ = self.call({})
+        self.assertTrue(result["isError"])
+        self.assertIn("relaunch", result["content"][0]["text"])
+
     def test_a_refused_load_commits_nothing_and_says_what_was_applied(self):
         path = os.path.join(tempfile.mkdtemp(), "p.dylib")
         with open(path, "wb") as handle:

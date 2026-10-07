@@ -1,3 +1,4 @@
+import Compression
 import DebugTrace
 import Foundation
 #if canImport(Darwin)
@@ -54,8 +55,10 @@ public enum DebugTraceInject {
             "_inject",
             "Load a patch built on the Mac and run its entry point. Live code changes: build-and-sign --inject builds the app so Swift functions can be replaced, and the apps MCP `inject` tool compiles, signs and sends the patch for you. Call this directly only with a dylib signed by the team that signed the app.",
             parameters: [
-                .string("patch", "the signed dylib, base64", required: true),
+                .string("patch", "the signed dylib, base64 (deflated first when encoding=deflate)", required: true),
                 .string("label", "what the patch is, for the load history", default: "patch"),
+                .string("encoding", "raw: the dylib's bytes; deflate: raw DEFLATE (RFC 1951) of them, for a patch whose symbol names (a large SwiftUI body's types) would not fit the request limit", default: "raw", choices: ["raw", "deflate"]),
+                .integer("bytes", "encoding=deflate: the dylib's size once inflated, required so the output buffer is bounded", range: 1...maxPatchBytes),
             ],
             destructive: true,
             timeout: .seconds(60)
@@ -64,6 +67,12 @@ public enum DebugTraceInject {
             guard let data = Data(base64Encoded: encoded), !data.isEmpty else {
                 throw DebugError.invalidArgument("patch is not base64",
                                                  hint: "send the dylib's bytes base64-encoded")
+            }
+            if arguments.string("encoding") == "deflate" {
+                guard let size = arguments.int("bytes") else {
+                    throw DebugError.invalidArgument("encoding=deflate needs bytes", hint: "send the dylib's uncompressed size as `bytes`")
+                }
+                return try load(try inflate(data, expecting: size), label: arguments.string("label") ?? "patch")
             }
             return try load(data, label: arguments.string("label") ?? "patch")
         })
@@ -85,6 +94,26 @@ public enum DebugTraceInject {
         let generation: Int
         let output: String?
         let patchCount: Int
+    }
+
+    /// Raw DEFLATE (what Apple's Compression framework calls `COMPRESSION_ZLIB`) into a buffer of
+    /// exactly `size` bytes. One byte more is allowed for, so a stream that inflates past `size`
+    /// is an error and not a silently cut patch.
+    static func inflate(_ data: Data, expecting size: Int) throws -> Data {
+        var output = Data(count: size + 1)
+        let written = output.withUnsafeMutableBytes { destination in
+            data.withUnsafeBytes { source in
+                compression_decode_buffer(destination.bindMemory(to: UInt8.self).baseAddress!, size + 1,
+                                          source.bindMemory(to: UInt8.self).baseAddress!, data.count,
+                                          nil, COMPRESSION_ZLIB)
+            }
+        }
+        guard written == size else {
+            throw DebugError.invalidArgument("the deflated patch inflates to \(written == size + 1 ? "more than" : "\(written) bytes, not") \(size) bytes",
+                                             hint: "send the dylib's exact uncompressed size as `bytes`, deflated as raw DEFLATE (zlib wbits=-15)")
+        }
+        output.removeLast()
+        return output
     }
 
     /// Writes `data` where the app can load it, `dlopen`s it, and runs its entry.

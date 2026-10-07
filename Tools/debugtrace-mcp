@@ -46,6 +46,7 @@ import re
 import subprocess
 import sys
 import time
+import zlib
 import urllib.error
 import urllib.request
 
@@ -561,6 +562,12 @@ INJECT_TOOL = os.path.join(os.path.dirname(os.path.realpath(__file__)), "debugtr
 MAX_PATCH_BASE64 = 900_000
 
 
+def deflate(data):
+    """Raw DEFLATE (RFC 1951): what Apple's Compression calls COMPRESSION_ZLIB."""
+    compressor = zlib.compressobj(9, zlib.DEFLATED, -15)
+    return compressor.compress(data) + compressor.flush()
+
+
 def run_inject_tool(session, *command):
     """The helper's JSON reply and exit status. It prints JSON on success and on failure."""
     try:
@@ -622,11 +629,21 @@ def tool_inject(arguments):
     loaded, output = [], None
     for dylib in dylibs:
         with open(dylib["path"], "rb") as handle:
-            encoded = base64.b64encode(handle.read()).decode()
-        if len(encoded) > MAX_PATCH_BASE64:
-            raise ToolError(f"the patch for {dylib['module']} is {len(encoded) // 1024} KiB, over the server's body limit",
-                            "inject fewer files at once")
-        status, reply = app_call(session, "_inject", {"patch": encoded, "label": dylib["label"]})
+            raw = handle.read()
+        arguments = {"patch": base64.b64encode(raw).decode(), "label": dylib["label"]}
+        if len(arguments["patch"]) > MAX_PATCH_BASE64:
+            # A big SwiftUI body drags megabytes of mangled type names into the symbol table; they
+            # deflate to a few percent. Only when needed, so an app whose runtime predates
+            # `encoding` keeps working for ordinary patches.
+            arguments = {"patch": base64.b64encode(deflate(raw)).decode(), "label": dylib["label"],
+                         "encoding": "deflate", "bytes": len(raw)}
+            if len(arguments["patch"]) > MAX_PATCH_BASE64:
+                raise ToolError(f"the patch for {dylib['module']} is {len(arguments['patch']) // 1024} KiB even deflated, over the server's body limit",
+                                "inject fewer files at once")
+        status, reply = app_call(session, "_inject", arguments)
+        if "encoding" in arguments and status == 400 and "encoding" in json.dumps(reply):
+            raise ToolError(f"{session.get('appName')}'s patch runtime is too old to take a patch this large",
+                            "relaunch it with `build-and-sign --mcp --inject` (that rebuilds the runtime), or inject fewer files at once")
         if status >= 400 or not reply.get("ok"):
             return text_result({"ok": False, "applied": loaded, "failedAt": dylib["label"], "reply": reply,
                                 "hint": "files are unchanged on disk; fix the reported problem and call inject again"}, is_error=True)

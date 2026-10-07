@@ -37,4 +37,22 @@ struct InjectTests {
         #expect(DebugTraceInject.hint(forLoadFailure: "missing code signature in x").contains("same development certificate"))
         #expect(DebugTraceInject.hint(forLoadFailure: "symbol not found in flat namespace '_x'").contains("--inject"))
     }
+
+    @Test func inflatesADeflatedPatchToItsDeclaredSize() async throws {
+        let original = Data((0..<4000).map { UInt8($0 % 7) })
+        let deflated = try (original as NSData).compressed(using: .zlib) as Data
+        #expect(try DebugTraceInject.inflate(deflated, expecting: original.count) == original)
+        // A wrong declared size is an error, never a cut or padded patch.
+        #expect(throws: DebugError.self) { try DebugTraceInject.inflate(deflated, expecting: original.count - 1) }
+        #expect(throws: DebugError.self) { try DebugTraceInject.inflate(deflated, expecting: original.count + 1) }
+        #expect(throws: DebugError.self) { try DebugTraceInject.inflate(Data("not deflate".utf8), expecting: 10) }
+    }
+
+    /// What `debugtrace-mcp` sends: Python's zlib with wbits=-15, a raw DEFLATE stream.
+    @Test func inflatesWhatPythonDeflated() throws {
+        let sent = Data(base64Encoded: "Uyk2Dy7PTCsJ9TQJy0wtD3B0dDX3qCzIyy8OMzQOTi0pycxLLw5JTAJJhqmMKh5VPKp4VPGo4lHFo4pHFQ8mxQA=")!
+        let expected = Data(String(repeating: "$s7SwiftUI4ViewPAAE7HypnosV13SettingsTabViewV", count: 50).utf8)
+        #expect(expected.count == 2250)
+        #expect(try DebugTraceInject.inflate(sent, expecting: 2250) == expected)
+    }
 }
