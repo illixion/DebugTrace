@@ -273,3 +273,21 @@ class ResolveAcrossDevices(unittest.TestCase):
         with self.assertRaises(mcp.ToolError) as caught:
             mcp.resolve("xrTimer@ATV")
         self.assertIn("AVP", caught.exception.hint)
+
+
+class ListingReachesNoApp(unittest.TestCase):
+    """Any request makes the device ask "Allow debug access?"; listing must not."""
+
+    def test_apps_and_discover_make_no_request(self):
+        saved = (mcp.all_sessions, mcp.request)
+        mcp.all_sessions = lambda: [{"appName": "Hypnos", "bundleId": "com.example.hypnos", "device": "AVP",
+                                     "url": "http://avp:8642", "keyId": "k1"}]
+        def refuse(*args, **kwargs):
+            raise AssertionError("listing apps sent a request to an app")
+        mcp.request = refuse
+        try:
+            result = call_tool("apps", {})
+            self.assertFalse(result.get("isError"), result)
+            self.assertIn("Hypnos", result["content"][0]["text"])
+        finally:
+            mcp.all_sessions, mcp.request = saved
