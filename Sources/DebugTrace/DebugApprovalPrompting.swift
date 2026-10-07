@@ -11,10 +11,34 @@ public struct DebugApprovalRequest: Sendable {
     /// the caller has this build's ledger.
     public let client: String
     public let appName: String
+    public let purpose: Purpose
 
-    public init(client: String, appName: String) {
+    /// What the person is being asked to allow. Code patching is asked for
+    /// separately, and again for each launch, because it makes the app run
+    /// code a client sent rather than only answering queries.
+    public enum Purpose: Sendable {
+        case access
+        case codePatching
+    }
+
+    public init(client: String, appName: String, purpose: Purpose = .access) {
         self.client = client
         self.appName = appName
+        self.purpose = purpose
+    }
+
+    /// The prompt's wording, shared by the system alert and DebugTraceUI's window.
+    public var title: String {
+        purpose == .access ? "Allow debug access?" : "Allow code changes?"
+    }
+
+    public var message: String {
+        switch purpose {
+        case .access:
+            "\(client) wants to read \(appName)'s logs and run its debug commands."
+        case .codePatching:
+            "\(client) wants to replace code in \(appName) while it runs. Only allow this if you started it."
+        }
     }
 }
 

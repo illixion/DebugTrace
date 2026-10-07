@@ -431,6 +431,7 @@ public final class DebugTraceServer {
             guard let body = try? JSONValue.parse(request.body), let name = body["name"]?.stringValue else {
                 return (errorResponse(.invalidArgument(#"body must be {"name": "<endpoint>", "arguments": {...}}"#)), nil)
             }
+            if let failure = await gateCodePatching(name, for: request) { return (errorResponse(failure, endpoint: name), nil) }
             return await invoke(name, arguments: body["arguments"]?.objectValue ?? [:], pretty: false)
         default:
             break
@@ -470,6 +471,7 @@ public final class DebugTraceServer {
             }
             arguments.merge(object) { _, fromBody in fromBody }
         }
+        if let failure = await gateCodePatching(name, for: request) { return (errorResponse(failure, endpoint: name), nil) }
         return await invoke(name, arguments: arguments, pretty: pretty)
     }
 
@@ -518,23 +520,34 @@ public final class DebugTraceServer {
         return nil
     }
 
+    /// Endpoints that make the app run code a client sent. Each needs its own
+    /// allowance on the device, per client and per launch, on top of access.
+    nonisolated static let codePatchingEndpoints: Set<String> = ["_inject"]
+
+    /// Nil unless `name` loads code and the person at the device hasn't allowed that.
+    func gateCodePatching(_ name: String, for request: HTTPRequest) async -> DebugError? {
+        guard Self.codePatchingEndpoints.contains(name) else { return nil }
+        return await approve(request, purpose: .codePatching)
+    }
+
     /// Nil when the person at the device has allowed this client for this launch.
-    private func approve(_ request: HTTPRequest) async -> DebugError? {
+    private func approve(_ request: HTTPRequest, purpose: DebugApprovalRequest.Purpose = .access) async -> DebugError? {
         let client = DebugApprovals.clientName(header: request.header("x-debugtrace-client"),
                                                userAgent: request.header("user-agent"))
         let appName = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
             ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "this app"
-        switch await approvals.allowed(client, appName: appName, timeout: configuration.approvalTimeout) {
+        let what = purpose == .access ? "debug access" : "code changes"
+        switch await approvals.allowed(client, appName: appName, purpose: purpose, timeout: configuration.approvalTimeout) {
         case .allowed:
             return nil
         case .declined:
-            return DebugError(.forbidden, "debug access for \"\(client)\" was declined on the device",
+            return DebugError(.forbidden, "\(what) for \"\(client)\" was declined on the device",
                               hint: "relaunch the app to be asked again, and choose Allow")
         case .silenced(let until):
             return DebugError(.forbidden, "the device is refusing new debug clients without asking, until \(DebugTime.iso(until))",
                               hint: "after declining requests, the person at the device silenced the prompt; relaunch the app to be asked again")
         case .waiting:
-            return DebugError(.forbidden, "waiting for someone to allow \"\(client)\" on the device",
+            return DebugError(.forbidden, "waiting for someone to allow \(what) for \"\(client)\" on the device",
                               hint: "accept the prompt in the app (it must be in the foreground), then retry")
         }
     }

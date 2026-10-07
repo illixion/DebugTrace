@@ -137,17 +137,19 @@ struct DebugApprovalView: View {
         VStack(spacing: 16) {
             switch center.prompt {
             case .access(let request)?:
-                Image(systemName: "ladybug")
+                Image(systemName: request.purpose == .access ? "ladybug" : "curlybraces")
                     .font(.system(size: 40))
-                Text("Allow debug access?")
+                Text(request.title)
                     .font(.title2.bold())
-                Text("\(request.client) wants to read \(request.appName)'s logs and run its debug commands.")
+                Text(request.message)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 VStack(spacing: 10) {
-                    Button("Allow") { center.respond(.access(.allowOnce)) }
+                    Button(request.purpose == .access ? "Allow" : "Allow Once") { center.respond(.access(.allowOnce)) }
                         .buttonStyle(.borderedProminent)
-                    Button("Always for This Build") { center.respond(.access(.allowForBuild)) }
+                    if request.purpose == .access {
+                        Button("Always for This Build") { center.respond(.access(.allowForBuild)) }
+                    }
                     Button("Don't Allow", role: .cancel) { center.respond(.access(.deny)) }
                 }
             case .silence(let offer)?:

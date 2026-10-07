@@ -292,7 +292,11 @@ editing back and injecting again.
 **Security: signing, not the token, is the gate.** The OS loads a dylib only if the team that signed
 the app signed it, so a client holding the bearer token (a sniffed LAN request, a made-up client
 name) still cannot make the app run code without the signing key. On top of that: `_inject` is
-`destructive`, needs the on-device approval like every command, refuses in release privacy mode,
+`destructive`, needs the on-device approval like every command **plus its own prompt**
+("Allow code changes?": `DebugApprovalRequest.purpose == .codePatching`, asked per client and per
+launch, Allow Once / Don't Allow only, never remembered for the build, a decline sticks, and it does
+not count toward the silence offer; `DebugTraceServer.codePatchingEndpoints` lists the gated names),
+refuses in release privacy mode,
 and the product is separate so a **submission build leaves it unlinked** (code that loads
 executable code at runtime is not something to ship to the App Store; `register` also no-ops in
 release). No app needs to link anything: `build-and-sign --inject` compiles the runtime with the app's own

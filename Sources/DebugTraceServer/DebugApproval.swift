@@ -75,17 +75,21 @@ final class DebugApprovals {
 
     /// Whether `client` may be served. Waits up to `timeout` for the person at
     /// the device, including for prompts ahead of its own.
-    func allowed(_ client: String, appName: String, timeout: Duration) async -> Answer {
+    func allowed(_ name: String, appName: String, purpose: DebugApprovalRequest.Purpose = .access,
+                 timeout: Duration) async -> Answer {
         if case .allowAll = mode { return .allowed }
+        // Patching is its own question: allowing a client to read says nothing
+        // about letting it run code, and it is never remembered across launches.
+        let client = purpose == .access ? name : "patch:" + name
         if let decision = decided[client] { return decision ? .allowed : .declined }
-        if (defaults.stringArray(forKey: rememberedKey) ?? []).contains(client) {
+        if purpose == .access, (defaults.stringArray(forKey: rememberedKey) ?? []).contains(client) {
             decided[client] = true
             return .allowed
         }
-        if pending[client] == nil, let silence { return .silenced(until: silence) }
+        if purpose == .access, pending[client] == nil, let silence { return .silenced(until: silence) }
         let task = pending[client] ?? {
             let task = Task { @MainActor [weak self] () -> Answer in
-                await self?.prompt(client, appName: appName) ?? .declined
+                await self?.prompt(client, name: name, appName: appName, purpose: purpose) ?? .declined
             }
             pending[client] = task
             return task
@@ -107,15 +111,16 @@ final class DebugApprovals {
     }
 
     /// One client's turn at the screen, queued behind any prompt already up.
-    private func prompt(_ client: String, appName: String) async -> Answer {
+    private func prompt(_ client: String, name: String, appName: String,
+                        purpose: DebugApprovalRequest.Purpose) async -> Answer {
         await takeTurn()
         defer { endTurn() }
         defer { pending[client] = nil }
-        if let silence { return .silenced(until: silence) }
+        if purpose == .access, let silence { return .silenced(until: silence) }
         // Everyone who asked gave up while it queued: a flood of names left
         // behind no stack of prompts. The next request asks afresh.
         guard waiting[client, default: 0] > 0 else { return .waiting }
-        let request = DebugApprovalRequest(client: client, appName: appName)
+        let request = DebugApprovalRequest(client: name, appName: appName, purpose: purpose)
         let decision: DebugApprovalDecision
         let chime = chimeWhilePrompting()
         defer { chime?.cancel() }
@@ -129,12 +134,15 @@ final class DebugApprovals {
             decided[client] = true
         case .allowForBuild:
             decided[client] = true
-            let remembered = defaults.stringArray(forKey: rememberedKey) ?? []
-            defaults.set(remembered + [client], forKey: rememberedKey)
+            // A custom handler may answer this; code patching is never remembered.
+            if purpose == .access {
+                let remembered = defaults.stringArray(forKey: rememberedKey) ?? []
+                defaults.set(remembered + [client], forKey: rememberedKey)
+            }
         case .deny:
             decided[client] = false
-            declinesSinceOffer += 1
-            if declinesSinceOffer >= Self.declinesBeforeOffer {
+            if purpose == .access { declinesSinceOffer += 1 }
+            if purpose == .access, declinesSinceOffer >= Self.declinesBeforeOffer {
                 declinesSinceOffer = 0
                 // Still this client's turn, so the offer can't stack on the next prompt.
                 await offerSilence(appName: appName)
@@ -208,11 +216,11 @@ enum DebugApprovalPrompt {
         if let presenter = DebugApprovalPresenter.current, let decision = await presenter.ask(request) {
             return decision
         }
-        let title = "Allow debug access?"
-        let message = "\(request.client) wants to read \(request.appName)'s logs and run its debug commands."
-        return await alert(title: title, message: message, buttons: [
-            ("Allow", .allowOnce), ("Always for This Build", .allowForBuild),
-        ], cancel: ("Don't Allow", .deny))
+        let buttons: [(String, DebugApprovalDecision)] = request.purpose == .access
+            ? [("Allow", .allowOnce), ("Always for This Build", .allowForBuild)]
+            : [("Allow Once", .allowOnce)]
+        return await alert(title: request.title, message: request.message, buttons: buttons,
+                           cancel: ("Don't Allow", .deny))
     }
 
     static func offerSilence(_ offer: DebugSilenceOffer) async -> Bool {

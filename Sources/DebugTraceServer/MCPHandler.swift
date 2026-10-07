@@ -54,6 +54,13 @@ final class MCPHandler {
                 return (rpcError(id: id, code: -32602, message: "tools/call needs params.name"), nil)
             }
             let arguments = params?["arguments"]?.objectValue ?? [:]
+            if let failure = await server.gateCodePatching(name, for: request) {
+                let payload: JSONValue = ["ok": false, "error": failure.json]
+                return (result(id: id, [
+                    "content": [["type": "text", "text": .string(payload.serializedString())]],
+                    "isError": true,
+                ]), nil)
+            }
             return await call(name, arguments: arguments, id: id)
         default:
             return (rpcError(id: id, code: -32601, message: "method '\(method)' is not supported; this server offers tools only"), nil)

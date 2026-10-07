@@ -118,6 +118,52 @@ import Testing
         #expect(asked.clients.count == 2)
     }
 
+    @Test func codePatchingIsAskedSeparatelyAndNeverRemembered() async {
+        let defaults = UserDefaults(suiteName: "DebugTraceApprovalTests-\(UUID().uuidString)")!
+        var purposes: [DebugApprovalRequest.Purpose] = []
+        let mode = DebugApproval.custom { request in
+            purposes.append(request.purpose)
+            return request.purpose == .access ? .allowOnce : .deny
+        }
+        let approvals = DebugApprovals(mode: mode, defaults: defaults, build: "abc1234")
+        #expect(await approvals.allowed("Agent", appName: "App", timeout: .seconds(1)) == .allowed)
+        // Access does not carry over to patching, and a decline sticks for the launch.
+        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .declined)
+        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .declined)
+        #expect(purposes == [.access, .codePatching])
+        // "Always for this build" is honoured for access only.
+        let remembering = DebugApproval.custom { _ in .allowForBuild }
+        let first = DebugApprovals(mode: remembering, defaults: defaults, build: "x1")
+        #expect(await first.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .allowed)
+        let relaunch = DebugApprovals(mode: mode, defaults: defaults, build: "x1")
+        #expect(await relaunch.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .declined)
+    }
+
+    @Test func theInjectEndpointNeedsItsOwnAllowance() async throws {
+        let surface = DebugSurface()
+        surface.register(.command("_inject", "load a patch") { _ in ["ok": true] })
+        surface.register(.command("_other", "something else") { _ in ["ok": true] })
+        let server = DebugTraceServer(surface: surface, configuration: .init(
+            ports: 0...0, binding: .loopback, authentication: .token("t"),
+            approval: .custom { request in request.purpose == .access ? .allowOnce : .deny }))
+        let base = URL(string: "http://127.0.0.1:\(try await server.start())")!
+        defer { server.stop() }
+        func post(_ name: String) async throws -> (Int, JSONValue) {
+            var request = URLRequest(url: base.appendingPathComponent(name))
+            request.httpMethod = "POST"
+            request.httpBody = Data("{}".utf8)
+            request.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+            request.setValue("Agent", forHTTPHeaderField: "X-DebugTrace-Client")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            return ((response as! HTTPURLResponse).statusCode, try JSONValue.parse(data))
+        }
+        #expect(try await post("_other").0 == 200)
+        let (status, body) = try await post("_inject")
+        #expect(status == 403)
+        #expect(body["error"]?["message"]?.stringValue?.contains("code changes") == true)
+    }
+
     @Test func promptsForDifferentClientsNeverStack() async throws {
         let asked = Asked()
         let mode = DebugApproval.custom { request in
