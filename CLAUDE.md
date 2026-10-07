@@ -108,7 +108,10 @@ server unlinked, carry no code that suspends threads): `seconds`, `intervalMs`, 
 Per thread: busy % (leaf not in a wait), self and inclusive top functions, hottest stacks. The stack
 walk is C (`DebugTraceSampler`) because nothing may allocate or touch the Swift runtime while a
 thread is suspended. Frame-pointer walk; app symbols resolve through `dladdr` and are demangled,
-system libraries' private symbols show as `(private in <library>)`. Measured on Oneiros on a Vision
+system libraries' private symbols (`<redacted>` to `dladdr`) are named from the
+device's own `dyld_shared_cache_<arch>.symbols`, which an app can read and map
+(`DebugSharedCacheSymbols`; ~70 ms the first time, clean file pages, no Mac or Xcode symbol download).
+Swift and C++ names are demangled. Where that file is missing (macOS) they stay `(private in <library>)`. Measured on Oneiros on a Vision
 Pro: ~7 µs per sample, 113 ms total pause over 3 s of all-thread sampling. Not `releaseSafe` (the
 confidential profile refuses it). Unnamed threads are listed as `unnamed thread <id>`. Traces made
 over HTTP download from `GET /_traces/<id>.zip`. `_tools` and `_call` are plain-HTTP

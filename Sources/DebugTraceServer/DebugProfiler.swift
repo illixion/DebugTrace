@@ -267,7 +267,13 @@ enum DebugProfiler {
         let raw = String(cString: name)
         // The shared cache hides system libraries' private symbols; the
         // library still says where the time went.
-        if raw == "<redacted>" { return Symbol(function: "(private in \(image))", image: image) }
+        if raw == "<redacted>" {
+            let base = UInt(bitPattern: info.dli_fbase)
+            if let found = DebugSharedCacheSymbols.shared?.name(for: UInt(address), imageBase: base) {
+                return Symbol(function: demangle(found), image: image)
+            }
+            return Symbol(function: "(private in \(image))", image: image)
+        }
         return Symbol(function: demangle(raw), image: image)
     }
 
@@ -278,13 +284,29 @@ enum DebugProfiler {
         return unsafeBitCast(symbol, to: Demangle.self)
     }()
 
+    private typealias CxxDemangle = @convention(c) (UnsafePointer<CChar>?, UnsafeMutablePointer<CChar>?,
+                                                    UnsafeMutablePointer<Int>?, UnsafeMutablePointer<Int32>?) -> UnsafeMutablePointer<CChar>?
+    nonisolated(unsafe) private static let cxxDemangle: CxxDemangle? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "__cxa_demangle") else { return nil }
+        return unsafeBitCast(symbol, to: CxxDemangle.self)
+    }()
+
     static func demangle(_ name: String) -> String {
+        if name.hasPrefix("_Z"), let cxxDemangle {
+            var status: Int32 = 0
+            guard let result = name.withCString({ cxxDemangle($0, nil, nil, &status) }), status == 0 else { return name }
+            defer { free(result) }
+            return shorten(String(cString: result))
+        }
         let mangled = name.hasPrefix("_$s") || name.hasPrefix("$s") || name.hasPrefix("_T")
         guard mangled, let swiftDemangle else { return name }
         let plain = name.hasPrefix("_$s") ? String(name.dropFirst()) : name
         guard let result = plain.withCString({ swiftDemangle($0, strlen($0), nil, nil, 0) }) else { return name }
         defer { free(result) }
-        let text = String(cString: result)
-        return text.count > 200 ? String(text.prefix(200)) + "…" : text
+        return shorten(String(cString: result))
+    }
+
+    private static func shorten(_ text: String) -> String {
+        text.count > 200 ? String(text.prefix(200)) + "…" : text
     }
 }

@@ -30,5 +30,20 @@ struct ProfilerTests {
     @Test func demanglesSwiftNames() {
         #expect(DebugProfiler.demangle("$sSi1poiyS2i_SitFZ").contains("+"))
         #expect(DebugProfiler.demangle("mach_msg2_trap") == "mach_msg2_trap")
+        #expect(DebugProfiler.demangle("_ZN3rcp16SharedSimulation24handle_runloop_will_idleEv")
+                == "rcp::SharedSimulation::handle_runloop_will_idle()")
+    }
+}
+
+struct SharedCacheSymbolTests {
+    /// Where the OS ships a readable symbols file, a system function resolves
+    /// to a name; where it doesn't, the lookup says so instead of guessing.
+    @Test func resolvesASystemFunctionOrDeclines() throws {
+        guard let symbols = DebugSharedCacheSymbols.shared else { return }
+        let address = try #require(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "objc_retain"))
+        var info = Dl_info()
+        #expect(dladdr(address, &info) != 0)
+        let name = symbols.name(for: UInt(bitPattern: address) + 4, imageBase: UInt(bitPattern: info.dli_fbase))
+        #expect(name?.contains("retain") == true, "\(name ?? "nil")")
     }
 }
