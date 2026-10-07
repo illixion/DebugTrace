@@ -75,7 +75,7 @@ needs no change: `--inject` embeds the patch runtime and `DebugTraceServer` load
 in the live app. It cannot change stored properties, initializers or type headers; it says so and you
 rebuild. The patch is signed with your development certificate and the device asks "Allow code
 changes?" once per launch, so the debug token alone cannot make an app run code. An `--inject` build
-runs Swift about 25-35% slower (measured on a game), so profile a normal build. See `CLAUDE.md`.
+runs Swift about 25-35% slower (measured on a game), so profile a normal build. See [Docs/live-patching.md](Docs/live-patching.md).
 
 ## Profiling and memory
 
@@ -97,7 +97,8 @@ Queries whose arguments all have defaults are added to every trace automatically
 `trace: .never` to leave one out, or `trace: .arguments([...])` to capture it with specific
 arguments.
 
-See [CLAUDE.md](CLAUDE.md) for the design rules, the wire formats and the security model.
+Adding it to an app: [Docs/integration.md](Docs/integration.md). Everything else (design rules, wire formats, the security
+model, live patching) is under [Docs/](Docs/README.md); [CLAUDE.md](CLAUDE.md) maps the code.
 
 ## Companion project
 
