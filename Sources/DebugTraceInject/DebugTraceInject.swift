@@ -134,3 +134,12 @@ public enum DebugTraceInject {
         return "rebuild with build-and-sign --inject and try again"
     }
 }
+
+/// The C entry for the runtime that `build-and-sign --inject` embeds in the app
+/// bundle, so an app that never links `DebugTraceInject` can still be patched in
+/// a build made for it: the debug server finds the dylib in the bundle's
+/// Frameworks, loads it and calls this. A no-op in release privacy mode.
+@_cdecl("debugtrace_inject_register")
+nonisolated public func debugtrace_inject_register() {
+    MainActor.assumeIsolated { DebugTraceInject.register() }
+}

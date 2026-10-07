@@ -323,6 +323,22 @@ def command_patch(options):
         commit=[p for p in changed])
 
 
+# MARK: runtime
+
+RUNTIME_SOURCE = os.path.join(HERE, "..", "..", "Sources", "DebugTraceInject", "DebugTraceInject.swift")
+
+
+def command_runtime(options):
+    """Compile DebugTraceInject itself, with the app's own compiler arguments, so a
+    build made for patching can carry the runtime without the app linking it."""
+    state = load_state(options.dir)
+    work = tempfile.mkdtemp(prefix="debugtrace-runtime-")
+    dylib, ms = compile_patch(state, state["appModule"], [os.path.realpath(RUNTIME_SOURCE)], "Runtime", work)
+    os.makedirs(os.path.dirname(os.path.abspath(options.out)), exist_ok=True)
+    shutil.copyfile(dylib, options.out)
+    say(ok=True, path=options.out, compileMs=ms, module=state["appModule"])
+
+
 # MARK: commit / reset
 
 def command_commit(options):
@@ -359,10 +375,14 @@ def main():
     commit = sub.add_parser("commit")
     commit.add_argument("--dir", required=True)
     commit.add_argument("--file", action="append", required=True)
+    runtime = sub.add_parser("runtime")
+    runtime.add_argument("--dir", required=True)
+    runtime.add_argument("--out", required=True)
     reset = sub.add_parser("reset")
     reset.add_argument("--dir", required=True)
     options = parser.parse_args()
-    handler = {"capture": command_capture, "patch": command_patch, "commit": command_commit, "reset": command_reset}
+    handler = {"capture": command_capture, "patch": command_patch, "commit": command_commit, "reset": command_reset,
+               "runtime": command_runtime}
     try:
         handler[options.command](options)
     except Failure as failure:
