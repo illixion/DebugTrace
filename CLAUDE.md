@@ -99,7 +99,10 @@ anything:
   Only malformed JSON-RPC gets a protocol error. Images come back as MCP image content.
   Protocol versions supported: 2025-06-18, 2025-03-26, 2024-11-05.
 
-Built-ins every app gets: `_info`, `_logs`, `_features`, `_snapshot`, `_trace`. Traces made
+Built-ins every app gets: `_info`, `_logs`, `_features`, `_memory`, `_snapshot`, `_trace`. `_memory` is
+read-only and `releaseSafe` (sizes only): footprint, peak, `availableBytes` (headroom before jetsam,
+`os_proc_available_memory`), malloc totals, Metal's allocated bytes and the largest kinds of mapped
+memory by dirty size; ~3 ms on a Vision Pro. Call it before and after an action to see what grew. Traces made
 over HTTP download from `GET /_traces/<id>.zip`. `_tools` and `_call` are plain-HTTP
 spellings of MCP's `tools/list` and `tools/call`.
 

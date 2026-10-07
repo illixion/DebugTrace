@@ -365,3 +365,19 @@ func run(_ executable: String, _ arguments: [String]) throws -> ProcessOutput {
     process.waitUntilExit()
     return ProcessOutput(status: process.terminationStatus, output: data)
 }
+
+@MainActor
+struct MemoryEndpointTests {
+    @Test func memoryReportsSizesAndIsSafeForRelease() async throws {
+        let surface = DebugSurface()
+        let endpoint = try #require(surface.endpoint(named: "_memory"))
+        #expect(endpoint.releaseSafe && endpoint.kind == .query)
+        guard case .success(let output) = await surface.call("_memory", arguments: ["regions": 3]),
+              case .json(let json) = output.body else { Issue.record("_memory failed"); return }
+        #expect((json["process"]?["footprintBytes"]?.intValue ?? 0) > 1_000_000)
+        #expect((json["malloc"]?["sizeInUseBytes"]?.intValue ?? 0) > 0)
+        #expect(json["largestRegionKinds"]?.arrayValue?.count == 3)
+        let text = json.serializedString()
+        #expect(!text.contains("/Users"), "no paths or names, only sizes")
+    }
+}

@@ -343,6 +343,12 @@ public final class DebugSurface {
                                   buffer: system ? nil : DebugLogBuffer.shared.stats)
         })
 
+        register(.query("_memory", "Memory the app is using, with the headroom left before the system kills it: footprint (what jetsam counts), peak, resident and compressed bytes, `availableBytes` (os_proc_available_memory; absent on macOS), malloc totals, GPU memory the Metal device has allocated, and the largest kinds of mapped memory by dirty size (malloc, iosurface, swift metadata, stacks). Call it twice around an action to see what grew; all sizes are bytes. Costs a few milliseconds.",
+                        parameters: [.integer("regions", "how many of the largest kinds of mapped memory to list", default: 12, range: 1...60)],
+                        trace: .never, releaseSafe: true) { arguments in
+            DebugMemoryReport.capture(topRegions: arguments.int("regions") ?? 12)
+        })
+
         register(.query("_features", "Features in use right now, and this session's recent feature marks, newest last. The marks also persist across relaunches in a trace's breadcrumbs files.",
                         parameters: [.integer("limit", "recent marks returned", default: 50, range: 1...500)],
                         releaseSafe: true) { arguments in
