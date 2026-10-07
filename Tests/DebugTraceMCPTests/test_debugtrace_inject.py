@@ -205,6 +205,17 @@ class InjectToolTests(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertIn("relaunch", result["content"][0]["text"])
 
+    def test_an_edit_that_changes_nothing_compiled_says_so_and_is_recorded(self):
+        plan = {"ok": True, "dylibs": [], "commit": ["/proj/A.swift"], "files": {"A.swift": {"hasPatch": False}}}
+        self.wire([{"label": "x"}], plan)
+        result, body = self.call({})
+        self.assertFalse(result.get("isError", False))
+        self.assertTrue(body["nothingToPatch"])
+        self.assertEqual(body["applied"], [])
+        self.assertIn("#if", body["note"])
+        self.assertNotIn("_inject", [name for name, _ in self.app_calls])
+        self.assertEqual([c[0] for c in self.helper_calls][-1], "commit")
+
     def test_a_refused_load_commits_nothing_and_says_what_was_applied(self):
         path = os.path.join(tempfile.mkdtemp(), "p.dylib")
         with open(path, "wb") as handle:

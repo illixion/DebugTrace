@@ -124,5 +124,33 @@ WindowGroup(id: "main") { ContentView().reopensWindowOnPatch("main") }
 After each patch a copy of the window opens and the old one closes. State in models
 survives; `@State` in the old window does not.
 
-**Not yet verified on a device:** all three, and whether `@PatchRefresh` in a parent reaches
-a patched child. Test on xrTimer or Oneiros before relying on them, and update this page.
+**Verified on a Vision Pro (Hypnos Settings screen, 2026-10-07)**, patching a header's text with the header
+on screen and no navigation:
+
+| Setup | Result |
+|---|---|
+| `@PatchRefresh` in the patched view, patching that view's own `body` | refreshed |
+| `@PatchRefresh` in the patched **child** | refreshed |
+| `@PatchRefresh` only in the **parent**, patching a child's `body` | **not refreshed** |
+| `.rebuildsOnPatch()` around the patched child | refreshed |
+
+So declare `@PatchRefresh` in each view whose `body` you edit (or wrap a screen in `.rebuildsOnPatch()`);
+a parent's opt-in does not reach a child. A row that SwiftUI creates later (a lazy list row scrolled into
+view) evaluates the patched code when it appears, with or without any of this: test with the view on
+screen when the patch loads. **Not yet verified:** `.reopensWindowOnPatch`.
+
+## When an edit patches nothing
+
+`inject` replies `nothingToPatch: true` when no function or computed-property body changed in code this build
+compiles: the edit is a comment, whitespace, or a branch of an `#if` that is off for this build (a
+`#if os(tvOS)` block on a visionOS build; Hypnos's `CacheSettingsSection` has one). Nothing is sent to the
+app and the file is recorded as current. Edit the branch the build compiles.
+
+## Large patches
+
+A patch for a big SwiftUI `body` can be over a megabyte: the symbol table carries the body's mangled
+generic types (about 800 KB for Hypnos's `SettingsTabView`), more than the server's 1 MiB request limit allows.
+The `inject` tool sends such a patch as raw DEFLATE with its inflated size (`encoding=deflate`, `bytes`),
+and `_inject` inflates it into a buffer of exactly that size. Ordinary patches go as before. The runtime that
+does the inflating is embedded at build time, so an app launched before this existed says to relaunch with
+`build-and-sign --mcp --inject`.

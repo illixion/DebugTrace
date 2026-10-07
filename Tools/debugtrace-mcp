@@ -623,7 +623,17 @@ def tool_inject(arguments):
         return text_result(plan, is_error=True)
     dylibs = plan.get("dylibs") or []
     if not dylibs:
-        return text_result(plan)
+        # Nothing this build compiles changed: a comment, whitespace, or a branch of an #if that is off
+        # for this build (a tvOS-only block, say). Say so, and record the file as current so the same
+        # edit is not reported again by the next call.
+        if plan.get("commit"):
+            run_inject_tool(session, "commit", "--dir", directory, *sum((["--file", f] for f in plan["commit"]), []))
+        return text_result({"ok": True, "applied": [], "nothingToPatch": True,
+                            "note": "no function or computed-property body changed in code this build compiles, so nothing was sent "
+                                    "to the app. If you meant to change behavior, the edit is in a comment, in whitespace, or in a "
+                                    "branch of an #if that is not active for this build (e.g. #if os(tvOS) on a visionOS build): "
+                                    "edit the branch that is.",
+                            "files": plan.get("files")})
 
     started = time.monotonic()
     loaded, output = [], None
