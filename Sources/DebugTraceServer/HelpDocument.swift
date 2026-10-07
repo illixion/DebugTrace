@@ -9,8 +9,8 @@ import Foundation
 /// signature without paying for the whole catalog again.
 @MainActor
 enum HelpDocument {
-    static func build(surface: DebugSurface, baseURL: String, tokenRequired: Bool, only: String?) -> JSONValue {
-        let endpoints = surface.catalog.filter { only == nil || $0.name == only }
+    static func build(catalog: [DebugEndpoint], baseURL: String, tokenRequired: Bool, only: String?) -> JSONValue {
+        let endpoints = catalog.filter { only == nil || $0.name == only }
         let auth = tokenRequired ? " -H \"Authorization: Bearer $DEBUG_TOKEN\"" : ""
         let described: [JSONValue] = endpoints.map { describe($0, baseURL: baseURL, auth: auth) }
         if only != nil { return ["endpoints": .array(described)] }

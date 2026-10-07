@@ -48,7 +48,7 @@ final class MCPHandler {
         case "ping":
             return (result(id: id, [:]), nil)
         case "tools/list":
-            return (result(id: id, ["tools": .array(server.surface.catalog.map(Self.toolDefinition))]), nil)
+            return (result(id: id, ["tools": .array(server.servedCatalog.map(Self.toolDefinition))]), nil)
         case "tools/call":
             guard let name = params?["name"]?.stringValue else {
                 return (rpcError(id: id, code: -32602, message: "tools/call needs params.name"), nil)
@@ -68,7 +68,7 @@ final class MCPHandler {
     }
 
     private func call(_ name: String, arguments: [String: JSONValue], id: JSONValue) async -> DebugTraceServer.Reply {
-        switch await server.surface.call(name, arguments: arguments) {
+        switch await server.call(name, arguments: arguments) {
         case .failure(let error):
             let payload: JSONValue = ["ok": false, "error": error.json]
             return (result(id: id, [

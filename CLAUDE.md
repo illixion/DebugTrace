@@ -381,6 +381,13 @@ verified upload and Traces view. Not yet done:
 4. Typed per-app providers. Raven's `LabControlServer`. The apps outside RAVE (web-yt-dlp;
    worldcast needs `NSLog` → `Logger` first).
 
+**Confidential profile.** `Configuration.confidential` (pass it to `startIfRequested(configuration:)`) is
+default-deny: the server serves only queries marked `releaseSafe` (so `_info`, `_features` and the app's
+own content-free ones) and **no command at all**, which also keeps `_inject` out and stops the patch
+runtime loading. `_logs`, `_snapshot`, `_trace`, trace downloads and any other endpoint answer 404
+like an unknown name, and the help and tool lists omit them. It limits what can be asked, not what a
+safe endpoint returns, so keep the seeded-value leak test. RegentChat uses it (2026-10-07).
+
 RegentChat adopted it on 2026-10-03 under a stricter rule than the default: two read-only,
 content-free queries, `includesSystemLog: false`, the extension left unlinked, and a test
 that seeds personal values and fails if one reaches a reply. Copy that shape for any app that

@@ -93,6 +93,14 @@ public final class DebugTraceServer {
         /// run patched code, such as a confidential one; it is also never
         /// loaded in release mode.
         public var loadsPatchRuntime: Bool
+        /// For apps that carry private content (a messenger). Serves only
+        /// queries marked `releaseSafe` and no command at all, so a leaked token
+        /// reads a status page and nothing else; `_logs`, `_snapshot`, `_trace`
+        /// and every `_inject`-style command are refused, and the patch
+        /// runtime never loads. An app still keeps its own content out of
+        /// those replies: this limits what can be asked, not what a safe
+        /// endpoint returns, so test them (see RegentChat's privacy tests).
+        public var confidential: Bool
 
         public static let defaultPorts: ClosedRange<UInt16> = 8642...8691
 
@@ -101,7 +109,7 @@ public final class DebugTraceServer {
                     authentication: Authentication = .automatic, maxBodyBytes: Int = 1 << 20,
                     redactsResponses: Bool = true, allowedInRelease: Bool = false, advertises: Bool = true,
                     approval: DebugApproval = .ask, approvalTimeout: Duration = .seconds(60),
-                    approvalSound: Bool = true, loadsPatchRuntime: Bool = true) {
+                    approvalSound: Bool = true, loadsPatchRuntime: Bool = true, confidential: Bool = false) {
             self.ports = ports
             self.binding = binding
             self.authentication = authentication
@@ -112,7 +120,8 @@ public final class DebugTraceServer {
             self.approval = approval
             self.approvalTimeout = approvalTimeout
             self.approvalSound = approvalSound
-            self.loadsPatchRuntime = loadsPatchRuntime
+            self.loadsPatchRuntime = loadsPatchRuntime && !confidential
+            self.confidential = confidential
         }
     }
 
@@ -208,9 +217,9 @@ public final class DebugTraceServer {
     /// `DebugSurface.shared` when this launch asked for one
     /// (`requestedAtLaunch`), and does nothing otherwise. Endpoints can be
     /// registered before or after: the server reads the surface per request.
-    public static func startIfRequested() {
+    public static func startIfRequested(configuration: Configuration = Configuration()) {
         guard requestedAtLaunch, shared == nil else { return }
-        let server = DebugTraceServer()
+        let server = DebugTraceServer(configuration: configuration)
         shared = server
         server.startInBackground()
     }
@@ -422,7 +431,7 @@ public final class DebugTraceServer {
             }
             return await mcp.handle(request)
         case "/_tools":
-            return (jsonResponse(200, ["tools": .array(surface.catalog.map(MCPHandler.toolDefinition))]), nil)
+            return (jsonResponse(200, ["tools": .array(servedCatalog.map(MCPHandler.toolDefinition))]), nil)
         case "/_call":
             guard request.method == "POST" else {
                 return (errorResponse(DebugError(.methodNotAllowed, "/_call takes POST",
@@ -437,12 +446,12 @@ public final class DebugTraceServer {
             break
         }
 
-        if path.hasPrefix("/_traces/"), request.method == "GET" {
+        if path.hasPrefix("/_traces/"), request.method == "GET", !configuration.confidential {
             return (traceDownload(String(path.dropFirst("/_traces/".count))), nil)
         }
 
         let name = String(path.dropFirst())
-        guard let endpoint = surface.endpoint(named: name) else {
+        guard let endpoint = surface.endpoint(named: name), permits(endpoint) else {
             return (errorResponse(surface.notFound(name), endpoint: name), nil)
         }
 
@@ -477,7 +486,7 @@ public final class DebugTraceServer {
 
     private func invoke(_ name: String, arguments: [String: JSONValue], pretty: Bool) async -> Reply {
         let start = ContinuousClock.now
-        switch await surface.call(name, arguments: arguments) {
+        switch await call(name, arguments: arguments) {
         case .failure(let error):
             return (errorResponse(error, endpoint: name), nil)
         case .success(let result):
@@ -518,6 +527,28 @@ public final class DebugTraceServer {
                               hint: "tokens change with every build; fetch the one for the build now installed (see _help → app.build)")
         }
         return nil
+    }
+
+    // MARK: Confidential profile
+
+    /// Whether this server may serve `endpoint` at all. Always yes, unless
+    /// `configuration.confidential`: then only a query its author marked
+    /// `releaseSafe` (free of personal content), and never a command.
+    func permits(_ endpoint: DebugEndpoint) -> Bool {
+        !configuration.confidential || (endpoint.kind == .query && endpoint.releaseSafe)
+    }
+
+    /// The endpoints a client can see and call.
+    var servedCatalog: [DebugEndpoint] { surface.catalog.filter(permits) }
+
+    /// `surface.call`, minus what this server's profile withholds. A withheld
+    /// endpoint answers as unknown names do, so a probe learns nothing about
+    /// what the app has.
+    func call(_ name: String, arguments: [String: JSONValue]) async -> Result<DebugResult, DebugError> {
+        if configuration.confidential, !(surface.endpoint(named: name).map(permits) ?? false) {
+            return .failure(surface.notFound(name))
+        }
+        return await surface.call(name, arguments: arguments)
     }
 
     /// Endpoints that make the app run code a client sent. Each needs its own
@@ -571,10 +602,10 @@ public final class DebugTraceServer {
             return .json(200, HelpDocument.anonymous().serialized(pretty: request.query["pretty"] != "0"))
         }
         let only = request.query["endpoint"]
-        if let only, surface.endpoint(named: only) == nil {
+        if let only, !(surface.endpoint(named: only).map(permits) ?? false) {
             return errorResponse(surface.notFound(only))
         }
-        let document = HelpDocument.build(surface: surface, baseURL: baseURL(request),
+        let document = HelpDocument.build(catalog: servedCatalog, baseURL: baseURL(request),
                                           tokenRequired: token != nil, only: only)
         return .json(200, document.serialized(pretty: request.query["pretty"] != "0"))
     }
