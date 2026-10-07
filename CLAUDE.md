@@ -102,7 +102,15 @@ anything:
 Built-ins every app gets: `_info`, `_logs`, `_features`, `_memory`, `_snapshot`, `_trace`. `_memory` is
 read-only and `releaseSafe` (sizes only): footprint, peak, `availableBytes` (headroom before jetsam,
 `os_proc_available_memory`), malloc totals, Metal's allocated bytes and the largest kinds of mapped
-memory by dirty size; ~3 ms on a Vision Pro. Call it before and after an action to see what grew. Traces made
+memory by dirty size; ~3 ms on a Vision Pro. Call it before and after an action to see what grew.
+The server adds `_profile` (sampling profiler; in DebugTraceServer, so App Store builds, which leave the
+server unlinked, carry no code that suspends threads): `seconds`, `intervalMs`, `threads=main|all`.
+Per thread: busy % (leaf not in a wait), self and inclusive top functions, hottest stacks. The stack
+walk is C (`DebugTraceSampler`) because nothing may allocate or touch the Swift runtime while a
+thread is suspended. Frame-pointer walk; app symbols resolve through `dladdr` and are demangled,
+system libraries' private symbols show as `(private in <library>)`. Measured on Oneiros on a Vision
+Pro: ~7 µs per sample, 113 ms total pause over 3 s of all-thread sampling. Not `releaseSafe` (the
+confidential profile refuses it). Unnamed threads are listed as `unnamed thread <id>`. Traces made
 over HTTP download from `GET /_traces/<id>.zip`. `_tools` and `_call` are plain-HTTP
 spellings of MCP's `tools/list` and `tools/call`.
 

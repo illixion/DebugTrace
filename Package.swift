@@ -25,7 +25,10 @@ let package = Package(
     targets: [
         .target(name: "DebugTrace"),
         .target(name: "DebugTraceUI", dependencies: ["DebugTrace"]),
-        .target(name: "DebugTraceServer", dependencies: ["DebugTrace"]),
+        .target(name: "DebugTraceServer", dependencies: ["DebugTrace", "DebugTraceSampler"]),
+        // `_profile`'s stack walker: C, because the code that runs while another
+        // thread is suspended must not allocate or touch the Swift runtime.
+        .target(name: "DebugTraceSampler"),
         .target(name: "DebugTraceInject", dependencies: ["DebugTrace"]),
         .testTarget(name: "DebugTraceInjectTests", dependencies: ["DebugTraceInject", "DebugTraceServer"]),
         .testTarget(name: "DebugTraceTests", dependencies: ["DebugTrace"]),

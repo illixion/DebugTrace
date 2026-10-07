@@ -237,6 +237,7 @@ public final class DebugTraceServer {
                              hint: "set Configuration.allowedInRelease, or capture a trace from the app instead")
         }
         if configuration.loadsPatchRuntime { DebugPatchRuntimeLoader.loadIfEmbedded(log: log) }
+        if surface.endpoint(named: "_profile") == nil { surface.register(DebugProfiler.endpoint) }
         let candidates = (lastPort.map { [$0] } ?? []) + configuration.ports.filter { $0 != lastPort }
         for candidate in candidates {
             do {
