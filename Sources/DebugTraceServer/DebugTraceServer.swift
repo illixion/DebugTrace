@@ -88,6 +88,11 @@ public final class DebugTraceServer {
         /// Chime when a prompt is shown, and again every few seconds while it
         /// waits: the prompt is easy to miss on a headset. On by default.
         public var approvalSound: Bool
+        /// Load the live-patching runtime if a development build embeds one
+        /// (`build-and-sign --inject`). Set false in an app that must never
+        /// run patched code, such as a confidential one; it is also never
+        /// loaded in release mode.
+        public var loadsPatchRuntime: Bool
 
         public static let defaultPorts: ClosedRange<UInt16> = 8642...8691
 
@@ -96,7 +101,7 @@ public final class DebugTraceServer {
                     authentication: Authentication = .automatic, maxBodyBytes: Int = 1 << 20,
                     redactsResponses: Bool = true, allowedInRelease: Bool = false, advertises: Bool = true,
                     approval: DebugApproval = .ask, approvalTimeout: Duration = .seconds(60),
-                    approvalSound: Bool = true) {
+                    approvalSound: Bool = true, loadsPatchRuntime: Bool = true) {
             self.ports = ports
             self.binding = binding
             self.authentication = authentication
@@ -107,6 +112,7 @@ public final class DebugTraceServer {
             self.approval = approval
             self.approvalTimeout = approvalTimeout
             self.approvalSound = approvalSound
+            self.loadsPatchRuntime = loadsPatchRuntime
         }
     }
 
@@ -221,6 +227,7 @@ public final class DebugTraceServer {
             throw DebugError(.forbidden, "the debug server does not run in release builds",
                              hint: "set Configuration.allowedInRelease, or capture a trace from the app instead")
         }
+        if configuration.loadsPatchRuntime { DebugPatchRuntimeLoader.loadIfEmbedded(log: log) }
         let candidates = (lastPort.map { [$0] } ?? []) + configuration.ports.filter { $0 != lastPort }
         for candidate in candidates {
             do {

@@ -295,8 +295,15 @@ name) still cannot make the app run code without the signing key. On top of that
 `destructive`, needs the on-device approval like every command, refuses in release privacy mode,
 and the product is separate so a **submission build leaves it unlinked** (code that loads
 executable code at runtime is not something to ship to the App Store; `register` also no-ops in
-release). An app opts in by linking `DebugTraceInject` and calling `DebugTraceInject.register()`
-next to `startIfRequested()`; none does by default.
+release). No app needs to link anything: `build-and-sign --inject` compiles the runtime with the app's own
+compiler arguments (`debugtrace-inject runtime`), embeds it as `Frameworks/DebugTraceInject.dylib`
+(signed with the rest of the bundle), and `DebugTraceServer.start()` loads it when present
+(`DebugPatchRuntimeLoader`; development privacy mode only). A build without `--inject`, and every
+App Store build, has no such file. Layers of opt-out: don't pass `--inject`;
+`DEBUGTRACE_INJECT=off` in a repo's build-signing.conf refuses the flag; `Configuration.loadsPatchRuntime
+= false` in the app; release mode never loads. Linking `DebugTraceInject` and calling
+`register()` still works for an app that wants it compiled in. `--inject` also sets
+`DEAD_CODE_STRIPPING=NO`. Verified on the real xrTimer (28 s build+deploy, no source change).
 
 **Costs to know.** Implicit-dynamic makes every call to a replaceable function indirect, so an
 `--inject` build is not the shipping binary's performance (frame-budget apps: measure with a normal
