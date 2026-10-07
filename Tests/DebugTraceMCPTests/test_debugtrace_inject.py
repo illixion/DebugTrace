@@ -299,3 +299,93 @@ class Scope(unittest.TestCase):
         self.assertTrue(inject.replaceable(dynamic, "Game", state))
         # A package whose record is left over from an all-scope build.
         self.assertFalse(inject.replaceable(dynamic, "VoxelRender", state))
+
+
+IFCONFIG_OLD = """import Foundation
+#if canImport(AppKit)
+import AppKit
+struct Mac { func name() -> String { "mac" } }
+#else
+struct Other { func name() -> String { "other" } }
+#endif
+struct Shared {
+    #if os(visionOS)
+    func label() -> String { "vision" }
+    #else
+    func label() -> String { "flat" }
+    #endif
+    func value() -> Int {
+        #if DEBUG
+        return 1
+        #else
+        return 2
+        #endif
+    }
+}
+"""
+
+
+class BuildConfigurationFromArguments(unittest.TestCase):
+    def test_target_conditions_and_language_mode(self):
+        config = inject.build_configuration({"args": [
+            "-target", "arm64-apple-xros26.0-simulator", "-D", "DEBUG", "-DSWIFT_PACKAGE", "-swift-version", "5",
+            "-enable-upcoming-feature", "ExistentialAny", "-I", "/p", "-F/f"]}, [6, 4])
+        self.assertEqual((config["os"], config["arch"], config["environment"]), ("visionOS", "arm64", "simulator"))
+        self.assertEqual(config["conditions"], ["DEBUG", "SWIFT_PACKAGE"])
+        self.assertEqual(config["features"], ["ExistentialAny"])
+        self.assertEqual(config["languageVersion"], [5, 10])   # Swift 5 mode on a 6.x compiler
+        self.assertEqual((config["importPaths"], config["frameworkPaths"]), (["/p"], ["/f"]))
+
+    def test_mac_catalyst_and_ios(self):
+        config = inject.build_configuration({"args": ["-target", "arm64-apple-ios18.0-macabi"]}, [6])
+        self.assertEqual((config["os"], config["environment"]), ("iOS", "macCatalyst"))
+
+
+@unittest.skipUnless(shutil.which("xcrun"), "needs Xcode's toolchain")
+class RewriterIfConfigTests(unittest.TestCase):
+    """#if reduced to the branch the app was compiled with."""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        cls.tool = inject.rewriter()
+        sdk = subprocess.run(["xcrun", "--sdk", "xros", "--show-sdk-path"], capture_output=True, text=True).stdout.strip()
+        cls.config = inject.build_configuration(
+            {"args": ["-target", "arm64-apple-xros26.0", "-sdk", sdk, "-swift-version", "6", "-D", "DEBUG"]}, [6, 4])
+
+    def run_rewriter(self, new, config=True):
+        import subprocess
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        paths = {name: os.path.join(directory, name) for name in ("old.swift", "new.swift", "out.swift", "b.json")}
+        for name, text in (("old.swift", IFCONFIG_OLD), ("new.swift", new)):
+            with open(paths[name], "w") as handle:
+                handle.write(text)
+        with open(paths["b.json"], "w") as handle:
+            json.dump(self.config, handle)
+        command = [self.tool, "--old", paths["old.swift"], "--new", paths["new.swift"], "--module", "App",
+                   "--source-file", "Q.swift", "--out", paths["out.swift"]] + (["--config", paths["b.json"]] if config else [])
+        done = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        with open(paths["out.swift"]) as handle:
+            return json.loads(done.stdout), handle.read()
+
+    def test_active_branches_are_patched(self):
+        new = IFCONFIG_OLD.replace('"vision"', '"vision 2"').replace('"other"', '"other 2"').replace("return 1", "return 10")
+        report, patch = self.run_rewriter(new)
+        self.assertEqual(sorted(report["patched"]), ["Other.name()", "Shared.label()", "Shared.value()"])
+        self.assertEqual(report["unpatchable"], [])
+        self.assertIn('"vision 2"', patch)
+        self.assertIn("return 10", patch)
+        self.assertNotIn("#if", patch)
+        self.assertNotIn("import AppKit", patch)   # canImport(AppKit) is false on visionOS
+
+    def test_a_change_only_in_an_inactive_branch_patches_nothing(self):
+        new = IFCONFIG_OLD.replace('"flat"', '"flat 2"').replace('"mac"', '"mac 2"').replace("return 2", "return 20")
+        report, _ = self.run_rewriter(new)
+        self.assertFalse(report["hasPatch"])
+        self.assertEqual(report["unpatchable"], [])
+
+    def test_without_a_configuration_a_changed_if_is_refused(self):
+        report, _ = self.run_rewriter(IFCONFIG_OLD.replace('"vision"', '"vision 2"'), config=False)
+        self.assertTrue(report["unpatchable"])

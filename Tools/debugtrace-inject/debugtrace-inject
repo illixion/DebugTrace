@@ -34,7 +34,8 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-REWRITER_SOURCE = os.path.join(HERE, "Rewriter", "main.swift")
+REWRITER_DIR = os.path.join(HERE, "Rewriter")
+REWRITER_SOURCES = [os.path.join(REWRITER_DIR, name) for name in ("main.swift", "BuildConfig.swift")]
 STATE_HOME = os.path.expanduser(os.environ.get("XDG_STATE_HOME") or "~/.local/state")
 REWRITER_BIN = os.path.join(STATE_HOME, "debugtrace", "bin", "debugtrace-rewrite")
 BAS = os.environ.get("DEBUGTRACE_BAS") or os.path.expanduser("~/bin/build-and-sign")
@@ -166,18 +167,113 @@ def load_state(directory):
 def rewriter():
     """The SwiftSyntax tool, built on first use from the toolchain's own SwiftSyntax."""
     stale = (not os.path.exists(REWRITER_BIN)
-             or os.path.getmtime(REWRITER_BIN) < os.path.getmtime(REWRITER_SOURCE))
+             or os.path.getmtime(REWRITER_BIN) < max(os.path.getmtime(f) for f in REWRITER_SOURCES))
     if not stale:
         return REWRITER_BIN
     swiftc = subprocess.run(["xcrun", "--find", "swiftc"], capture_output=True, text=True).stdout.strip()
     host = os.path.join(os.path.dirname(os.path.dirname(swiftc)), "lib", "swift", "host")
     os.makedirs(os.path.dirname(REWRITER_BIN), exist_ok=True)
+    libraries = ["-lSwiftSyntax", "-lSwiftParser", "-lSwiftIfConfig", "-lSwiftDiagnostics", "-lSwiftOperators"]
     build = subprocess.run(
-        ["xcrun", "swiftc", "-O", REWRITER_SOURCE, "-I", host, "-L", host, "-lSwiftSyntax", "-lSwiftParser",
-         "-Xlinker", "-rpath", "-Xlinker", host, "-o", REWRITER_BIN], capture_output=True, text=True)
+        ["xcrun", "swiftc", "-O", *REWRITER_SOURCES, "-module-name", "debugtrace_rewrite", "-I", host, "-L", host,
+         *libraries, "-Xlinker", "-rpath", "-Xlinker", host, "-o", REWRITER_BIN], capture_output=True, text=True)
     if build.returncode != 0:
         raise Failure("could not build the patch rewriter", "this needs Xcode's toolchain: " + build.stderr[-600:])
     return REWRITER_BIN
+
+
+OS_NAMES = {"xros": "visionOS", "ios": "iOS", "macos": "macOS", "macosx": "macOS", "tvos": "tvOS",
+            "watchos": "watchOS"}
+
+
+def compiler_version():
+    """The toolchain's Swift version, e.g. [6, 3]: what `#if compiler(>=…)` compares against."""
+    text = subprocess.run(["xcrun", "swiftc", "--version"], capture_output=True, text=True).stdout
+    match = re.search(r"Swift version (\d+(?:\.\d+)*)", text)
+    return [int(n) for n in match.group(1).split(".")] if match else [6]
+
+
+_SDK_MODULES = {}
+
+
+def sdk_clang_modules(sdk):
+    """Top-level clang module names the SDK's module maps declare (Darwin, os, zlib…),
+    which `canImport` finds without a framework or .swiftmodule of their own."""
+    if sdk in _SDK_MODULES:
+        return _SDK_MODULES[sdk]
+    names = set()
+    include = os.path.join(sdk, "usr", "include")
+    maps = [os.path.join(include, f) for f in (os.listdir(include) if os.path.isdir(include) else [])
+            if f.endswith(".modulemap")]
+    maps += [os.path.join(include, d, "module.modulemap") for d in
+             (os.listdir(include) if os.path.isdir(include) else [])]
+    for path in maps:
+        try:
+            with open(path, errors="replace") as handle:
+                names.update(re.findall(r"^\s*(?:explicit\s+)?(?:framework\s+)?module\s+([A-Za-z_]\w*)",
+                                        handle.read(), re.M))
+        except OSError:
+            continue
+    _SDK_MODULES[sdk] = sorted(names)
+    return _SDK_MODULES[sdk]
+
+
+def build_configuration(module_record, compiler):
+    """What `#if` sees in this module: the target, conditions, language mode and
+    search paths, from the arguments it was compiled with."""
+    args = module_record["args"]
+    config = {"os": "", "arch": "arm64", "environment": "", "conditions": [], "features": [],
+              "languageVersion": [], "compilerVersion": compiler, "importPaths": [], "frameworkPaths": [],
+              "sdk": ""}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        value = args[i + 1] if i + 1 < len(args) else ""
+        if arg == "-target":
+            # arm64-apple-xros26.0[-simulator]
+            parts = value.split("-")
+            config["arch"] = parts[0]
+            if len(parts) >= 3:
+                config["os"] = OS_NAMES.get(re.sub(r"[\d.]+$", "", parts[2]), parts[2])
+            if len(parts) >= 4:
+                config["environment"] = {"macabi": "macCatalyst"}.get(parts[3], parts[3])
+            i += 2
+        elif arg == "-D":
+            config["conditions"].append(value)
+            i += 2
+        elif arg.startswith("-D") and len(arg) > 2:
+            config["conditions"].append(arg[2:])
+            i += 1
+        elif arg in ("-enable-upcoming-feature", "-enable-experimental-feature"):
+            config["features"].append(value.split(":")[0])
+            i += 2
+        elif arg == "-swift-version":
+            config["languageVersion"] = [int(n) for n in value.split(".") if n.isdigit()]
+            i += 2
+        elif arg == "-sdk":
+            config["sdk"] = value
+            i += 2
+        elif arg == "-I":
+            config["importPaths"].append(value)
+            i += 2
+        elif arg.startswith("-I") and len(arg) > 2:
+            config["importPaths"].append(arg[2:])
+            i += 1
+        elif arg in ("-F", "-Fsystem"):
+            config["frameworkPaths"].append(value)
+            i += 2
+        elif arg.startswith("-F") and len(arg) > 2 and not arg.startswith("-Fsystem"):
+            config["frameworkPaths"].append(arg[2:])
+            i += 1
+        else:
+            i += 1
+    config["sdkModules"] = sdk_clang_modules(config["sdk"]) if config["sdk"] else []
+    # Swift 5 mode on a Swift 6 compiler answers swift(>=5.10), not swift(>=6).
+    if config["languageVersion"][:1] == [5]:
+        config["languageVersion"] = [5, 10]
+    elif not config["languageVersion"]:
+        config["languageVersion"] = compiler
+    return config
 
 
 def read(path):
@@ -304,12 +400,19 @@ def command_patch(options):
     work = tempfile.mkdtemp(prefix="debugtrace-inject-")
     tool = rewriter()
     reports, per_module, problems = {}, {}, []
+    compiler = None
     started = time.monotonic()
     for index, path in enumerate(changed):
         module = where[path]
         patch_file = os.path.join(work, f"{module}-{index}-{os.path.basename(path)}")
+        config_file = os.path.join(work, f"{module}.build.json")
+        if not os.path.exists(config_file):
+            compiler = compiler or compiler_version()
+            with open(config_file, "w") as handle:
+                json.dump(build_configuration(state["modules"][module], compiler), handle)
         run = subprocess.run([tool, "--old", os.path.join(live, path.lstrip("/")), "--new", path, "--module", module,
-                              "--source-file", os.path.basename(path), "--out", patch_file],
+                              "--source-file", os.path.basename(path), "--out", patch_file,
+                              "--config", config_file],
                              capture_output=True, text=True)
         if run.returncode != 0:
             raise Failure(f"{os.path.basename(path)} does not parse", "fix the syntax error and inject again",
@@ -323,7 +426,7 @@ def command_patch(options):
         raise Failure(
             "this change cannot be applied to the running app",
             "rebuild and relaunch with `build-and-sign --mcp --inject`: a patch replaces function bodies and "
-            "adds methods, but cannot change stored properties, initializers, type headers or code inside #if",
+            "adds methods, but cannot change stored properties, initializers, type headers or protocol requirements",
             rebuildNeeded=True, because=problems, files=reports)
 
     dylibs, timings = [], {"rewriteMs": round((time.monotonic() - started) * 1000), "compileMs": 0}

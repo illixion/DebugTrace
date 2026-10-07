@@ -302,8 +302,15 @@ not the build. A relaunch (`_patches` empty) resets that state to the build.
 
 **What a patch cannot do**, and the reply says "rebuild" and applies **nothing** (never half):
 stored properties (added, removed, or a changed initial value), initializers, type headers
-(inheritance, generics), anything inside `#if`, new top-level declarations the rest of the app must
-see. Check this before promising an edit can go live. A loaded dylib cannot be unloaded: undo by
+(inheritance, generics), protocol requirements, new top-level declarations the rest of the app must
+see. Check this before promising an edit can go live. **`#if` is evaluated, not refused.** `debugtrace-inject` turns the module's recorded arguments into a
+build configuration (target triple → `os`/`arch`/`targetEnvironment`, `-D` conditions, `-swift-version`,
+feature flags, and `canImport` against the -I/-F paths, the SDK's frameworks and its module maps) and the
+rewriter keeps only each `#if`'s active branch (`SwiftIfConfig.removingInactive`) before diffing, so a
+whole-file `#if os(visionOS)`, `#if DEBUG` in a body or `#if canImport(AppKit)` patch like any other code;
+a change only in an inactive branch patches nothing. A condition it can't settle (a versioned
+`canImport`) leaves that file's `#if`s refused, as before. Verified on Oneiros's
+`GameSessionLifecycle.swift` (wrapped whole in `#if os(visionOS)`), 2026-10-07. A loaded dylib cannot be unloaded: undo by
 editing back and injecting again.
 
 **Security: signing, not the token, is the gate.** The OS loads a dylib only if the team that signed
