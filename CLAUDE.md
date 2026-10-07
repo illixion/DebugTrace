@@ -13,13 +13,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An app registers an endpoint once and it shows up in all three. That is the whole design.
 
-Three products:
+Four products:
 
 | Product | What | Links |
 |---|---|---|
 | `DebugTrace` | `DebugLogger` + in-process log buffer, `DebugSurface` registry, trace builder, log reader, breadcrumbs, redactor, credential | nothing |
 | `DebugTraceUI` | `DebugTraceView` / `DebugTraceButton` (capture → review → share/upload); `DebugApprovalWindow` (the server's prompt in a window of its own) | SwiftUI |
 | `DebugTraceServer` | `DebugTraceServer`: HTTP + MCP over a surface | Network |
+| `DebugTraceInject` | `_inject` / `_patches`: load a signed patch into the running app (live code patching, below) | `dlopen` |
 
 The server is its own product so a submission build can leave it **unlinked**. The old
 compile-flag strip (`ONEIROS_NO_DEBUG_SERVER`) removed the routes but still shipped the
@@ -244,7 +245,7 @@ TestFlight) never listens: `requested(...)` and `start()` both refuse.
 - **One MCP entry for every agent.** `apps` runs `Tools/debugtrace-mcp`, a stdio server with no
   dependencies, registered at Claude Code user scope and copied to Codex and Copilot by
   `agents-sync`. It reads records and browses on each call (cached 5 s), and checks `_info` so
-  a reused port can't misroute. Its four tools never change: `apps`, `help`, `call`, `trace`.
+  a reused port can't misroute. Its five tools never change: `apps`, `help`, `call`, `trace`, `inject`.
 - **Live tail.** `_logs` takes `afterSequence` (a reply's `lastSequence`) and `waitSeconds`
   (long poll, up to 25 s) on the app's own buffer. The cursor is clamped to what exists.
 
@@ -254,6 +255,68 @@ Keep the `listening on port N` wording and both marker strings (`DEBUGTRACE_STDE
 When adding an endpoint, mark it `releaseSafe` only if its data has no personal content:
 versions, counts, modes, health, error states. File names, URLs, account names, message
 text and locations are personal.
+
+## Live code patching (`inject`)
+
+Edit a Swift file, call the `inject` tool, and the running app has the new code in about three
+seconds with its state intact. No rebuild, no relaunch, no debugger (LLDB `expr` was tried and is
+too slow). **Measured on a Vision Pro (visionOS 27.2, TXM):** rewrite 15 ms, compile 0.9 s warm
+(6 s first), sign 0.3 s, load 0.2 s.
+
+```
+build-and-sign --mcp --inject      once: builds so functions are replaceable, launches, records the build
+(edit Foo.swift as usual)
+inject                             the `apps` MCP tool: patches what changed since the last injection
+inject {run: "return model.speed"} also evaluates a Swift function body afterwards, result in `output`
+```
+
+**How it works.** The app is built with `ENABLE_TESTABILITY=YES` and `-Xfrontend
+-enable-implicit-dynamic -enable-private-imports`, which makes every function replaceable and lets
+a patch reach `private` members. For each changed file `Tools/debugtrace-inject/Rewriter` (a
+SwiftSyntax tool built on first use against the Xcode toolchain's own SwiftSyntax, no package to
+fetch) diffs the token stream against the file as the running app has it and emits
+`@_dynamicReplacement` extensions for function and computed-property bodies that changed, copies new
+methods as they are, and **refuses** what a patch cannot do (below). `debugtrace-inject` compiles
+that with the module's own compiler arguments (recorded from `xcodebuild`'s log by `capture`),
+`build-and-sign --sign-dylib` signs it with the development identity, and the app `dlopen`s it
+through `_inject`. Later patches override earlier ones; a function changed back is replaced again
+with its original body, because the diff is against the last-injected state (`build/inject/live/`),
+not the build. A relaunch (`_patches` empty) resets that state to the build.
+
+**What a patch cannot do**, and the reply says "rebuild" and applies **nothing** (never half):
+stored properties (added, removed, or a changed initial value), initializers, type headers
+(inheritance, generics), anything inside `#if`, new top-level declarations the rest of the app must
+see. Check this before promising an edit can go live. A loaded dylib cannot be unloaded: undo by
+editing back and injecting again.
+
+**Security: signing, not the token, is the gate.** The OS loads a dylib only if the team that signed
+the app signed it, so a client holding the bearer token (a sniffed LAN request, a made-up client
+name) still cannot make the app run code without the signing key. On top of that: `_inject` is
+`destructive`, needs the on-device approval like every command, refuses in release privacy mode,
+and the product is separate so a **submission build leaves it unlinked** (code that loads
+executable code at runtime is not something to ship to the App Store; `register` also no-ops in
+release). An app opts in by linking `DebugTraceInject` and calling `DebugTraceInject.register()`
+next to `startIfRequested()`; none does by default.
+
+**Costs to know.** Implicit-dynamic makes every call to a replaceable function indirect, so an
+`--inject` build is not the shipping binary's performance (frame-budget apps: measure with a normal
+build). A patch compiles per module, with that module's flags, so changes in several packages are
+several dylibs. Not yet checked: SwiftUI view refresh after a patch (`DebugTraceInject.generation`
+is there for `.id(...)`), generics-heavy code, iOS.
+
+**Gotchas found building it**, so they are not rediscovered: without `-enable-testing` the
+replaceable functions are `hidden` and loading fails with "symbol not found in flat namespace
+…Tx"; `swiftc -emit-module-path … -o app` does not relink the executable, so emit the module
+separately; an unsigned or ad-hoc dylib is refused ("missing code signature") while one signed
+with the dev cert after install loads, including from the app's `tmp/`; an incremental build prints
+no compile command for an up-to-date module, so `capture` keeps what an earlier build recorded
+(`rm -rf build/DerivedData` if the record is missing).
+
+**The approval prompt chimes** (`Configuration.approvalSound`, default on): it is easy to miss on a
+headset, so it plays a two-note chime when shown and every 8 s while unanswered. It is an
+`AudioServices` alert sound: an `AVAudioPlayer` activates the app's audio session and **pauses
+music in other apps** (seen on the Vision Pro, even with `mixWithOthers`); an alert sound only
+ducks it.
 
 ## The trace
 

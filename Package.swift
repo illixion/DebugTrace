@@ -18,11 +18,16 @@ let package = Package(
         // The HTTP + MCP listener over the registry. Its own product so a
         // submission build can leave it unlinked entirely.
         .library(name: "DebugTraceServer", targets: ["DebugTraceServer"]),
+        // Live code patching for development builds (`_inject`). Its own
+        // product so a submission build can leave it unlinked.
+        .library(name: "DebugTraceInject", targets: ["DebugTraceInject"]),
     ],
     targets: [
         .target(name: "DebugTrace"),
         .target(name: "DebugTraceUI", dependencies: ["DebugTrace"]),
         .target(name: "DebugTraceServer", dependencies: ["DebugTrace"]),
+        .target(name: "DebugTraceInject", dependencies: ["DebugTrace"]),
+        .testTarget(name: "DebugTraceInjectTests", dependencies: ["DebugTraceInject", "DebugTraceServer"]),
         .testTarget(name: "DebugTraceTests", dependencies: ["DebugTrace"]),
         .testTarget(name: "DebugTraceServerTests", dependencies: ["DebugTraceServer"]),
     ]

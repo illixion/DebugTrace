@@ -66,6 +66,15 @@ private unless marked `.public`. `.sensitive` values are never kept.
   start. Their traces include only endpoints marked `releaseSafe: true`, so a user can send
   one to support. The user can read every file before sending.
 
+## Live code patching
+
+Link `DebugTraceInject` in development builds only and call `DebugTraceInject.register()` next to
+`startIfRequested()`. Launch with `build-and-sign --mcp --inject`, edit a Swift file, and the `inject`
+tool of the `apps` MCP server replaces the changed function bodies in the running app in about three
+seconds, state intact. It cannot change stored properties, initializers or type headers; it says so and
+you rebuild. The patch is signed with your development certificate, so the debug token alone cannot
+make an app run code. See `CLAUDE.md` for how it works and what it costs.
+
 ## Endpoints
 
 Queries whose arguments all have defaults are added to every trace automatically. Pass

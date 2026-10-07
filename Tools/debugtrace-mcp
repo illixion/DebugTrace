@@ -17,6 +17,7 @@ still works:
     help(app, endpoint?)          the app's self-describing API, with schemas
     call(app, endpoint, arguments?)  run one endpoint
     trace(app, note?)             capture a debug trace and save the zip here
+    inject(app, files?, run?)     apply edited Swift source to the running app, no rebuild
 
 Apps are found two ways: the session records above, and Bonjour. Every dev
 build that build-and-sign signs starts its server on each launch and
@@ -64,7 +65,8 @@ INSTRUCTIONS = (
     "`build-and-sign --mcp` appear. Call `apps` to see what is running, `help` to read an app's "
     "endpoints (typed parameters, defaults, ranges), then `call`. Queries only read; commands change "
     "app state. Every error carries a hint saying what to do next. Values the app logs as private "
-    "show as <private>; don't try to work around that."
+    "show as <private>; don't try to work around that. To change what a running app does, edit its Swift "
+    "source and call `inject` instead of rebuilding, when the app was launched with `build-and-sign --mcp --inject`."
 )
 
 TOOLS = [
@@ -98,6 +100,20 @@ TOOLS = [
                 "arguments": {"type": "object", "description": "the endpoint's arguments, by name"},
             },
             "required": ["endpoint"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "inject",
+        "description": "Change the running app's code without rebuilding. Edit the Swift source file normally, then call this with no arguments: it finds the files that changed since the last injection, replaces the changed function and computed-property bodies in the live process, adds new methods, and reports what it did and how long it took (usually a few seconds). The app keeps its state. Needs an app launched with `build-and-sign --mcp --inject` that links DebugTraceInject. A patch cannot change stored properties, initializers, type headers or anything inside #if: the reply then says rebuild, and nothing is applied. Optional `run` is a Swift function body (it must `return` a value) evaluated on the main actor afterwards, with the app's code in scope; its result comes back as `output`. Code you edit stays edited on disk, so the next normal build has the change too.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "app name or bundle id; optional when only one app is running"},
+                "files": {"type": "array", "items": {"type": "string"}, "description": "source files to inject, absolute or relative to the project root; default: every file that differs from what the app is running"},
+                "run": {"type": "string", "description": "Swift function body to evaluate after patching; must return a value, e.g. `return player.position`"},
+            },
             "additionalProperties": False,
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
@@ -500,7 +516,100 @@ def tool_trace(arguments):
                         "files": [f["path"] for f in data.get("files", [])]})
 
 
-HANDLERS = {"apps": tool_apps, "help": tool_help, "call": tool_call, "trace": tool_trace}
+INJECT_TOOL = os.path.join(os.path.dirname(os.path.realpath(__file__)), "debugtrace-inject", "debugtrace-inject")
+# The server refuses bodies over 1 MiB (Configuration.maxBodyBytes); a patch travels base64-encoded.
+MAX_PATCH_BASE64 = 900_000
+
+
+def run_inject_tool(session, *command):
+    """The helper's JSON reply and exit status. It prints JSON on success and on failure."""
+    try:
+        result = subprocess.run([INJECT_TOOL, *command], capture_output=True, text=True, cwd=session.get("projectRoot") or None,
+                                timeout=CALL_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ToolError(f"could not run debugtrace-inject: {error}", f"expected at {INJECT_TOOL}")
+    try:
+        return json.loads(result.stdout), result.returncode
+    except ValueError:
+        raise ToolError("debugtrace-inject failed: " + (result.stderr or result.stdout)[-600:])
+
+
+def app_call(session, name, arguments):
+    status, _, raw = request(session, "/_call", {"name": name, "arguments": arguments})
+    try:
+        reply = json.loads(raw)
+    except ValueError:
+        raise ToolError(f"{session.get('appName')} answered {status} with something that is not JSON", raw.decode("utf-8", "replace")[:300])
+    return status, reply
+
+
+def tool_inject(arguments):
+    session = verified(resolve(arguments.get("app")))
+    directory = session.get("injectDir")
+    if not directory:
+        raise ToolError(f"{session.get('appName')} was not launched for live patching",
+                        "rebuild and relaunch it with `build-and-sign --mcp --inject` from the app's repo")
+    files = arguments.get("files") or []
+    if isinstance(files, str):
+        files = [files]
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        raise ToolError("`files` must be a list of paths", "e.g. {\"files\": [\"Game/Player.swift\"]}")
+
+    # Is the app still the process that was built? A relaunch resets it to the build.
+    status, listed = app_call(session, "_patches", {})
+    if not listed.get("ok"):
+        error = listed.get("error") or {}
+        if error.get("code") == "not_found":
+            raise ToolError(f"{session.get('appName')} has no `_inject` endpoint",
+                            "link the DebugTraceInject product and call DebugTraceInject.register() at launch, then rebuild with --inject")
+        return text_result(listed, is_error=True)
+    if not (listed.get("data") or {}).get("patches"):
+        run_inject_tool(session, "reset", "--dir", directory)
+
+    command = ["patch", "--dir", directory]
+    for name in files:
+        command += ["--file", name]
+    if arguments.get("run"):
+        command += ["--run", arguments["run"]]
+    plan, code = run_inject_tool(session, *command)
+    if code != 0 or not plan.get("ok"):
+        return text_result(plan, is_error=True)
+    dylibs = plan.get("dylibs") or []
+    if not dylibs:
+        return text_result(plan)
+
+    started = time.monotonic()
+    loaded, output = [], None
+    for dylib in dylibs:
+        with open(dylib["path"], "rb") as handle:
+            encoded = base64.b64encode(handle.read()).decode()
+        if len(encoded) > MAX_PATCH_BASE64:
+            raise ToolError(f"the patch for {dylib['module']} is {len(encoded) // 1024} KiB, over the server's body limit",
+                            "inject fewer files at once")
+        status, reply = app_call(session, "_inject", {"patch": encoded, "label": dylib["label"]})
+        if status >= 400 or not reply.get("ok"):
+            return text_result({"ok": False, "applied": loaded, "failedAt": dylib["label"], "reply": reply,
+                                "hint": "files are unchanged on disk; fix the reported problem and call inject again"}, is_error=True)
+        loaded.append(dylib["label"])
+        data = reply.get("data") or {}
+        if data.get("output") is not None:
+            output = data["output"]
+    if plan.get("commit"):
+        run_inject_tool(session, "commit", "--dir", directory, *sum((["--file", f] for f in plan["commit"]), []))
+    summary = {"ok": True, "applied": loaded}
+    for relative, report in (plan.get("files") or {}).items():
+        summary.setdefault("patched", []).extend(f"{relative}: {name}" for name in report.get("patched", []))
+        if report.get("added"):
+            summary.setdefault("added", []).extend(f"{relative}: {name}" for name in report["added"])
+    if output is not None:
+        summary["output"] = output
+    timings = dict(plan.get("timings") or {})
+    timings["loadMs"] = round((time.monotonic() - started) * 1000)
+    summary["timings"] = timings
+    return text_result(summary)
+
+
+HANDLERS = {"apps": tool_apps, "help": tool_help, "call": tool_call, "inject": tool_inject, "trace": tool_trace}
 
 
 # MARK: Argument normalisation
@@ -516,6 +625,8 @@ ALIASES = {
     "app": ("bundleId", "bundle_id", "bundle", "appName", "application"),
     "endpoint": ("name", "endpointName", "endpoint_name", "tool", "method"),
     "arguments": ("args", "params", "parameters", "input", "payload", "body"),
+    "files": ("file", "paths", "path", "sources"),
+    "run": ("code", "snippet", "eval", "script", "swift", "expression"),
 }
 
 

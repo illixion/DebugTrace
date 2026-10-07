@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+"""
+debugtrace-inject: the Mac side of live code patching. Standard library only.
+
+    capture   after `build-and-sign --inject` built the app: record how every Swift
+              module was compiled and keep a copy of the sources as they were built
+    patch     turn the files edited since into a signed dylib per module
+    commit    remember that those edits are now live in the running app
+    reset     the app was relaunched: what runs is the build again
+
+`debugtrace-mcp`'s `inject` tool is the front door; this does the work and prints JSON.
+
+State lives in <project>/build/inject (build-and-sign passes it as --out):
+
+    modules.json   per module: the compiler arguments, its sources, where it was built
+    build/         the sources as the build compiled them
+    live/          the sources as the running app has them (build/ plus what was injected)
+
+A patch is diffed against live/, not build/: a function the agent changed and then
+changed back differs from the injected version, so it is replaced again and the app
+returns to the original behaviour. When the app is relaunched, live/ is reset to build/.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REWRITER_SOURCE = os.path.join(HERE, "Rewriter", "main.swift")
+STATE_HOME = os.path.expanduser(os.environ.get("XDG_STATE_HOME") or "~/.local/state")
+REWRITER_BIN = os.path.join(STATE_HOME, "debugtrace", "bin", "debugtrace-rewrite")
+BAS = os.environ.get("DEBUGTRACE_BAS") or os.path.expanduser("~/bin/build-and-sign")
+
+# Arguments of the build's own compile command that a patch compile must not carry.
+DROP_WITH_VALUE = {
+    "-module-name", "-output-file-map", "-emit-localized-strings-path", "-emit-module-path",
+    "-emit-objc-header-path", "-const-gather-protocols-list", "-dependency-scan-serialize-diagnostics-path",
+    "-clang-build-session-file", "-working-directory", "-num-threads", "-clang-scanner-module-cache-path",
+    "-sdk-module-cache-path", "-index-store-path", "-emit-module-interface-path", "-emit-const-values-path",
+    "-serialize-diagnostics-path", "-emit-private-module-interface-path", "-emit-package-module-interface-path",
+}
+DROP_FLAGS = {
+    "-c", "-emit-dependencies", "-emit-module", "-serialize-diagnostics", "-save-temps", "-no-color-diagnostics",
+    "-explicit-module-build", "-validate-clang-modules-once", "-emit-objc-header", "-emit-const-values",
+    "-whole-module-optimization", "-no-emit-module-separately-wmo", "-emit-localized-strings", "-profile-generate",
+    "-profile-coverage-mapping", "-g", "-index-ignore-system-modules", "-incremental", "-enable-batch-mode",
+    "-parse-as-library", "-emit-library", "-emit-executable",
+}
+
+
+class Failure(Exception):
+    """A failure the caller reports as it is, with what to do about it."""
+
+    def __init__(self, message, hint=None, **extra):
+        super().__init__(message)
+        self.message, self.hint, self.extra = message, hint, extra
+
+
+def say(**fields):
+    print(json.dumps(fields, indent=1, ensure_ascii=False))
+
+
+# MARK: capture
+
+def compile_commands(log):
+    """[(module, args, cwd, files)] for every Swift module compiled in an xcodebuild log."""
+    found = []
+    for line in log.splitlines():
+        if "builtin-SwiftDriver" not in line or "-module-name" not in line:
+            continue
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            continue
+        compiler = next((i for i, w in enumerate(words) if w.endswith("/swiftc") or w == "swiftc"), None)
+        if compiler is None:
+            continue
+        args = words[compiler + 1:]
+        module = args[args.index("-module-name") + 1] if "-module-name" in args else None
+        if not module:
+            continue
+        files, rest = [], []
+        for arg in args:
+            if arg.startswith("@") and arg.endswith(".SwiftFileList"):
+                try:
+                    with open(arg[1:]) as handle:
+                        files += [p.strip().strip('"').replace("\\ ", " ") for p in handle if p.strip()]
+                except OSError:
+                    pass
+            else:
+                if arg.endswith(".swift") and os.path.isabs(arg):
+                    files.append(arg)
+                rest.append(arg)
+        cwd = args[args.index("-working-directory") + 1] if "-working-directory" in args else None
+        found.append((module, rest, cwd, files))
+    return found
+
+
+def snapshot(root, files, destination):
+    for path in files:
+        target = os.path.join(destination, path.lstrip("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(path, target)
+
+
+def command_capture(options):
+    with open(options.log, errors="replace") as handle:
+        commands = compile_commands(handle.read())
+    out = options.out
+    os.makedirs(out, exist_ok=True)
+    state_path = os.path.join(out, "modules.json")
+    try:
+        with open(state_path) as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        state = {"modules": {}}
+    # An incremental build that found a module up to date prints no command for it:
+    # keep what an earlier build recorded.
+    for module, args, cwd, files in commands:
+        state["modules"][module] = {"args": args, "cwd": cwd, "files": files}
+    if not state["modules"]:
+        raise Failure("no Swift compile commands in the build log",
+                      "build with `build-and-sign --inject` once from a clean state: rm -rf build/DerivedData")
+    if options.app_module in state["modules"]:
+        state["appModule"] = options.app_module
+    elif "appModule" not in state:
+        state["appModule"] = (commands[-1][0] if commands else next(iter(state["modules"])))
+    state["products"] = options.products
+    state["root"] = options.root
+    for sub in ("build", "live"):
+        shutil.rmtree(os.path.join(out, sub), ignore_errors=True)
+    every = sorted({p for m in state["modules"].values() for p in m["files"]
+                    if os.path.isfile(p) and "/DerivedSources/" not in p and "/DerivedData/" not in p})
+    snapshot(options.root, every, os.path.join(out, "build"))
+    snapshot(options.root, every, os.path.join(out, "live"))
+    state["capturedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with open(state_path, "w") as handle:
+        json.dump(state, handle, indent=1)
+    print(f"recorded {len(state['modules'])} modules, {len(every)} sources "
+          f"({len(commands)} compiled in this build) for live patching")
+
+
+# MARK: patch
+
+def load_state(directory):
+    try:
+        with open(os.path.join(directory, "modules.json")) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        raise Failure("this build was not made for live patching",
+                      "rebuild and relaunch with `build-and-sign --mcp --inject`")
+
+
+def rewriter():
+    """The SwiftSyntax tool, built on first use from the toolchain's own SwiftSyntax."""
+    stale = (not os.path.exists(REWRITER_BIN)
+             or os.path.getmtime(REWRITER_BIN) < os.path.getmtime(REWRITER_SOURCE))
+    if not stale:
+        return REWRITER_BIN
+    swiftc = subprocess.run(["xcrun", "--find", "swiftc"], capture_output=True, text=True).stdout.strip()
+    host = os.path.join(os.path.dirname(os.path.dirname(swiftc)), "lib", "swift", "host")
+    os.makedirs(os.path.dirname(REWRITER_BIN), exist_ok=True)
+    build = subprocess.run(
+        ["xcrun", "swiftc", "-O", REWRITER_SOURCE, "-I", host, "-L", host, "-lSwiftSyntax", "-lSwiftParser",
+         "-Xlinker", "-rpath", "-Xlinker", host, "-o", REWRITER_BIN], capture_output=True, text=True)
+    if build.returncode != 0:
+        raise Failure("could not build the patch rewriter", "this needs Xcode's toolchain: " + build.stderr[-600:])
+    return REWRITER_BIN
+
+
+def read(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def patch_compile_arguments(module_record, name):
+    """The module's own compile arguments, minus what builds its products."""
+    args, out, i = module_record["args"], [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg in DROP_WITH_VALUE:
+            i += 2
+        elif arg in DROP_FLAGS or arg.startswith("@"):
+            i += 1
+        elif arg == "-module-cache-path":
+            if i + 1 < len(args) and args[i + 1].endswith("ModuleCache.noindex"):
+                out += [arg, args[i + 1]]
+            i += 2
+        elif arg == "-Xfrontend" and i + 1 < len(args) and args[i + 1] == "-serialize-debugging-options":
+            i += 2
+        elif arg == "-Xcc" and i + 1 < len(args) and args[i + 1] == "-ivfsstatcache":
+            i += 4
+        elif arg.endswith(".swift") and os.path.isabs(arg):
+            i += 1
+        else:
+            out.append(arg)
+            i += 1
+    return out
+
+
+def compile_patch(state, module, sources, label, work):
+    record = state["modules"][module]
+    dylib = os.path.join(work, f"{label}.dylib")
+    command = (["xcrun", "swiftc"] + patch_compile_arguments(record, module)
+               + ["-I", state["products"], "-module-name", f"DebugTracePatch_{label}", "-parse-as-library",
+                  "-emit-library", "-o", dylib]
+               + sources + ["-Xlinker", "-undefined", "-Xlinker", "dynamic_lookup"])
+    started = time.monotonic()
+    result = subprocess.run(command, capture_output=True, text=True, cwd=record.get("cwd") or None)
+    if result.returncode != 0:
+        errors = [l for l in result.stderr.splitlines() if "error:" in l or l.lstrip().startswith(("|", "`"))][:40]
+        raise Failure(f"the patch for {module} did not compile", "fix the error in the source file, then inject again",
+                      compileErrors=errors or result.stderr.splitlines()[-20:], patchSource=sources)
+    return dylib, round((time.monotonic() - started) * 1000)
+
+
+def run_source(module, snippet):
+    return (
+        "import Foundation\n"
+        f"@testable import {module}\n\n"
+        '@_cdecl("debugtrace_patch_entry")\n'
+        "nonisolated public func debugtrace_patch_entry() -> UnsafeMutablePointer<CChar>? {\n"
+        "    MainActor.assumeIsolated { strdup(\"\\(__debugtraceRun())\") }\n"
+        "}\n\n"
+        "@MainActor func __debugtraceRun() -> Any {\n"
+        f"{snippet}\n"
+        "}\n"
+    )
+
+
+def sign(files, root):
+    result = subprocess.run([BAS, "--sign-dylib"] + files, capture_output=True, text=True, cwd=root)
+    if result.returncode != 0:
+        tail = [l for l in (result.stdout + result.stderr).splitlines() if l.strip()][-6:]
+        raise Failure("signing the patch failed", "check that build-and-sign can sign (certificate and profile in "
+                      "~/.config/build-signing/global.conf)", detail=tail)
+
+
+def command_patch(options):
+    state = load_state(options.dir)
+    root = state["root"]
+    live, built = os.path.join(options.dir, "live"), os.path.join(options.dir, "build")
+    where = {p: m for m, r in state["modules"].items() for p in r["files"]}
+
+    if options.file:
+        changed = []
+        for name in options.file:
+            path = name if os.path.isabs(name) else os.path.join(root, name)
+            path = os.path.realpath(path) if os.path.exists(path) else path
+            if path not in where:
+                raise Failure(f"{name} is not a source file of this build",
+                              "pass a Swift file that was compiled into the app; new files need a rebuild")
+            changed.append(path)
+    else:
+        changed = [p for p in where if os.path.isfile(p) and os.path.isfile(os.path.join(live, p.lstrip("/")))
+                   and read(p) != read(os.path.join(live, p.lstrip("/")))]
+    changed = [p for p in changed if os.path.isfile(p) and read(p) != read(os.path.join(live, p.lstrip("/")))]
+    if not changed and not options.run:
+        say(ok=True, changed=[], note="no file differs from what the running app has; nothing to inject")
+        return
+
+    work = tempfile.mkdtemp(prefix="debugtrace-inject-")
+    tool = rewriter()
+    reports, per_module, problems = {}, {}, []
+    started = time.monotonic()
+    for index, path in enumerate(changed):
+        module = where[path]
+        patch_file = os.path.join(work, f"{module}-{index}-{os.path.basename(path)}")
+        run = subprocess.run([tool, "--old", os.path.join(live, path.lstrip("/")), "--new", path, "--module", module,
+                              "--source-file", os.path.basename(path), "--out", patch_file],
+                             capture_output=True, text=True)
+        if run.returncode != 0:
+            raise Failure(f"{os.path.basename(path)} does not parse", "fix the syntax error and inject again",
+                          detail=run.stderr[-400:])
+        report = json.loads(run.stdout)
+        reports[os.path.relpath(path, root) if path.startswith(root) else path] = report
+        problems += [{"file": os.path.basename(path), **p} for p in report["unpatchable"]]
+        if report["hasPatch"]:
+            per_module.setdefault(module, []).append(patch_file)
+    if problems:
+        raise Failure(
+            "this change cannot be applied to the running app",
+            "rebuild and relaunch with `build-and-sign --mcp --inject`: a patch replaces function bodies and "
+            "adds methods, but cannot change stored properties, initializers, type headers or code inside #if",
+            rebuildNeeded=True, because=problems, files=reports)
+
+    dylibs, timings = [], {"rewriteMs": round((time.monotonic() - started) * 1000), "compileMs": 0}
+    for number, (module, sources) in enumerate(sorted(per_module.items())):
+        dylib, ms = compile_patch(state, module, sources, f"{module}{number}", work)
+        timings["compileMs"] += ms
+        dylibs.append({"module": module, "path": dylib, "label": f"{module}: " + ", ".join(
+            sorted({os.path.basename(s).split('-', 2)[2] for s in sources}))})
+    if options.run:
+        app = state.get("appModule")
+        source = os.path.join(work, "DebugTraceRun.swift")
+        with open(source, "w") as handle:
+            handle.write(run_source(app, options.run))
+        dylib, ms = compile_patch(state, app, [source], "Run", work)
+        timings["compileMs"] += ms
+        dylibs.append({"module": app, "path": dylib, "label": "run snippet"})
+    started = time.monotonic()
+    sign([d["path"] for d in dylibs], root)
+    timings["signMs"] = round((time.monotonic() - started) * 1000)
+    say(ok=True, dylibs=dylibs, changed=[p for p in changed], files=reports, timings=timings,
+        commit=[p for p in changed])
+
+
+# MARK: commit / reset
+
+def command_commit(options):
+    live = os.path.join(options.dir, "live")
+    for path in options.file:
+        if os.path.isfile(path):
+            target = os.path.join(live, path.lstrip("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copyfile(path, target)
+    say(ok=True, note=f"{len(options.file)} file(s) are now the running app's source")
+
+
+def command_reset(options):
+    live, built = os.path.join(options.dir, "live"), os.path.join(options.dir, "build")
+    shutil.rmtree(live, ignore_errors=True)
+    shutil.copytree(built, live)
+    say(ok=True, note="live sources reset to the build")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="debugtrace-inject", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    capture = sub.add_parser("capture")
+    capture.add_argument("--log", required=True)
+    capture.add_argument("--out", required=True)
+    capture.add_argument("--root", required=True)
+    capture.add_argument("--app-module", default="")
+    capture.add_argument("--products", required=True)
+    patch = sub.add_parser("patch")
+    patch.add_argument("--dir", required=True)
+    patch.add_argument("--file", action="append")
+    patch.add_argument("--run")
+    commit = sub.add_parser("commit")
+    commit.add_argument("--dir", required=True)
+    commit.add_argument("--file", action="append", required=True)
+    reset = sub.add_parser("reset")
+    reset.add_argument("--dir", required=True)
+    options = parser.parse_args()
+    handler = {"capture": command_capture, "patch": command_patch, "commit": command_commit, "reset": command_reset}
+    try:
+        handler[options.command](options)
+    except Failure as failure:
+        say(ok=False, error=failure.message, hint=failure.hint, **failure.extra)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
