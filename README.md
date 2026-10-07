@@ -68,12 +68,28 @@ private unless marked `.public`. `.sensitive` values are never kept.
 
 ## Live code patching
 
-Link `DebugTraceInject` in development builds only and call `DebugTraceInject.register()` next to
-`startIfRequested()`. Launch with `build-and-sign --mcp --inject`, edit a Swift file, and the `inject`
-tool of the `apps` MCP server replaces the changed function bodies in the running app in about three
-seconds, state intact. It cannot change stored properties, initializers or type headers; it says so and
-you rebuild. The patch is signed with your development certificate, so the debug token alone cannot
-make an app run code. See `CLAUDE.md` for how it works and what it costs.
+Launch with `build-and-sign --mcp --inject`, edit a Swift file, and the `inject` tool of the `apps` MCP
+server replaces the changed function bodies in the running app in a few seconds, state intact. The app
+needs no change: `--inject` embeds the patch runtime and `DebugTraceServer` loads it (or link
+`DebugTraceInject` and call `register()` yourself). `inject` with `run` evaluates a Swift function body
+in the live app. It cannot change stored properties, initializers or type headers; it says so and you
+rebuild. The patch is signed with your development certificate and the device asks "Allow code
+changes?" once per launch, so the debug token alone cannot make an app run code. An `--inject` build
+runs Swift about 25-35% slower (measured on a game), so profile a normal build. See `CLAUDE.md`.
+
+## Profiling and memory
+
+Every app with the server gets `_profile` and `_memory`:
+
+- `_profile seconds=3 threads=all`: samples every thread's stack for a few seconds and reports per
+  thread how busy it was, the hottest functions (self and inclusive) and the hottest stacks. System
+  frameworks' private functions are named from the device's own shared-cache symbols, Swift and C++
+  demangled. Costs ~7 µs per sample; not in App Store builds (it lives in `DebugTraceServer`).
+- `_memory`: footprint, peak, headroom before the system kills the app, malloc and Metal totals, and
+  the largest kinds of mapped memory. Call it before and after an action to see what grew.
+
+`Configuration(confidential: true)` limits the server to queries marked `releaseSafe` and no commands
+(no logs, snapshots, traces or patching), for apps that hold private messages.
 
 ## Endpoints
 

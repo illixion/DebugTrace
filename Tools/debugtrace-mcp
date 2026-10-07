@@ -61,12 +61,22 @@ PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
 CALL_TIMEOUT_SECONDS = 200
 
 INSTRUCTIONS = (
-    "Debug servers of the user's apps, running on their devices. Only apps launched with "
-    "`build-and-sign --mcp` appear. Call `apps` to see what is running, `help` to read an app's "
-    "endpoints (typed parameters, defaults, ranges), then `call`. Queries only read; commands change "
-    "app state. Every error carries a hint saying what to do next. Values the app logs as private "
-    "show as <private>; don't try to work around that. To change what a running app does, edit its Swift "
-    "source and call `inject` instead of rebuilding, when the app was launched with `build-and-sign --mcp --inject`."
+    "Debug servers of the user's apps, running on their devices (dev builds signed by build-and-sign; "
+    "`build-and-sign --mcp` launches one with its log attached). Call `apps` to see what is running, `help` "
+    "to read an app's endpoints, then `call`. Queries only read; commands change app state. Every error "
+    "carries a hint saying what to do next. Values the app logs as private show as <private>; don't try to "
+    "work around that. The first request from you, and the first code change, each show a prompt on the "
+    "device: if a reply says it is waiting for someone to allow it, ask the user to tap Allow, then retry.\n"
+    "Reach for these before adding logging or rebuilding:\n"
+    "- Where does the time go: call `_profile` (threads=all for a render or game loop on its own thread). "
+    "It names the busy threads, the hot functions and stacks, system frameworks included.\n"
+    "- Memory: call `_memory` before and after an action and compare (footprint, jetsam headroom, malloc, "
+    "GPU, region kinds).\n"
+    "- Change code without a rebuild: edit the Swift file, then `inject` (needs a launch with "
+    "`build-and-sign --mcp --inject`; patching the user's apps this way is fine, no need to ask first). "
+    "`inject` with `run` evaluates Swift in the live app. An --inject build runs Swift code about 25-35% "
+    "slower, so measure performance on a normal build.\n"
+    "When one app runs on two devices, address it as bundleId@device (com.example.app@ixPhone)."
 )
 
 TOOLS = [
@@ -91,7 +101,7 @@ TOOLS = [
     },
     {
         "name": "call",
-        "description": "Run one endpoint of a running app and return its result. Pass the endpoint's parameters inside `arguments`, e.g. {\"endpoint\": \"_logs\", \"arguments\": {\"level\": \"error\"}}. Read `help` first for the endpoint's parameters. Built-ins every app has: _info, _logs (source=app|system, level, contains, limit, sinceSeconds), _features, _snapshot. Commands change app state.",
+        "description": "Run one endpoint of a running app and return its result. Pass the endpoint's parameters inside `arguments`, e.g. {\"endpoint\": \"_logs\", \"arguments\": {\"level\": \"error\"}}. Read `help` first for the endpoint's parameters. Built-ins every app has: _info, _logs (source=app|system, level, contains, limit, sinceSeconds, afterSequence/waitSeconds to tail), _features, _memory (footprint, headroom, malloc, GPU, region kinds; compare two calls), _profile (seconds, intervalMs, threads=main|all: busy threads, hot functions and stacks), _snapshot, _trace. Commands change app state.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -106,7 +116,7 @@ TOOLS = [
     },
     {
         "name": "inject",
-        "description": "Change the running app's code without rebuilding. Edit the Swift source file normally, then call this with no arguments: it finds the files that changed since the last injection, replaces the changed function and computed-property bodies in the live process, adds new methods, and reports what it did and how long it took (usually a few seconds). The app keeps its state. Needs an app launched with `build-and-sign --mcp --inject` that links DebugTraceInject. A patch cannot change stored properties, initializers, type headers or anything inside #if: the reply then says rebuild, and nothing is applied. Optional `run` is a Swift function body (it must `return` a value) evaluated on the main actor afterwards, with the app's code in scope; its result comes back as `output`. Code you edit stays edited on disk, so the next normal build has the change too.",
+        "description": "Change the running app's code without rebuilding. Edit the Swift source file normally, then call this with no arguments: it finds the files that changed since the last injection, replaces the changed function and computed-property bodies in the live process, adds new methods, and reports what it did and how long it took (usually a few seconds). The app keeps its state. Needs an app launched with `build-and-sign --mcp --inject` (it embeds the patch runtime; the app needs no change). The device asks once per launch to allow code changes. A patch cannot change stored properties, initializers, type headers or anything inside #if: the reply then says rebuild, and nothing is applied. Optional `run` is a Swift function body (it must `return` a value) evaluated on the main actor afterwards, with the app's code in scope; its result comes back as `output`. Code you edit stays edited on disk, so the next normal build has the change too.",
         "inputSchema": {
             "type": "object",
             "properties": {
