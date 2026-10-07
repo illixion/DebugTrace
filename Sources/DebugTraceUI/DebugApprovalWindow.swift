@@ -123,6 +123,13 @@ public struct DebugApprovalWindow: Scene {
             DebugApprovalView()
         }
         .windowResizability(.contentSize)
+        #if os(visionOS)
+        // A utility panel opens close to the person and in front of the app's
+        // other windows. Placed by default, it could land behind a window whose
+        // 3D content (a stereo video, a volume) stands out toward the viewer,
+        // and be hidden by it (seen in Hypnos's 3D player).
+        .defaultWindowPlacement { _, _ in WindowPlacement(.utilityPanel) }
+        #endif
         // Only ever opened for a prompt: never at launch, and never restored
         // as an empty "No request is waiting" window.
         .defaultLaunchBehavior(.suppressed)
