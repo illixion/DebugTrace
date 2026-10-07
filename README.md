@@ -74,7 +74,7 @@ needs no change: `--inject` embeds the patch runtime and `DebugTraceServer` load
 `DebugTraceInject` and call `register()` yourself). `inject` with `run` evaluates a Swift function body
 in the live app. It cannot change stored properties, initializers or type headers; it says so and you
 rebuild. The patch is signed with your development certificate and the device asks "Allow code
-changes?" once per launch, so the debug token alone cannot make an app run code. An `--inject` build
+changes?" for every patch, so the debug token alone cannot make an app run code. An `--inject` build
 runs Swift about 25-35% slower (measured on a game), so profile a normal build. See [Docs/live-patching.md](Docs/live-patching.md).
 
 ## Profiling and memory

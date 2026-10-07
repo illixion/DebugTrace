@@ -54,7 +54,7 @@ final class MCPHandler {
                 return (rpcError(id: id, code: -32602, message: "tools/call needs params.name"), nil)
             }
             let arguments = params?["arguments"]?.objectValue ?? [:]
-            if let failure = await server.gateCodePatching(name, for: request) {
+            if let failure = await server.gateCodePatching(name, arguments: arguments, for: request) {
                 let payload: JSONValue = ["ok": false, "error": failure.json]
                 return (result(id: id, [
                     "content": [["type": "text", "text": .string(payload.serializedString())]],

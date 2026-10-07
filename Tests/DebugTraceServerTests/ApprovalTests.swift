@@ -118,25 +118,48 @@ import Testing
         #expect(asked.clients.count == 2)
     }
 
-    @Test func codePatchingIsAskedSeparatelyAndNeverRemembered() async {
+    @Test func codePatchingIsAskedSeparatelyAndForEveryPatch() async {
         let defaults = UserDefaults(suiteName: "DebugTraceApprovalTests-\(UUID().uuidString)")!
-        var purposes: [DebugApprovalRequest.Purpose] = []
+        var asked: [(DebugApprovalRequest.Purpose, String?)] = []
+        var patchAnswers: [DebugApprovalDecision] = [.deny, .allowOnce, .allowForBuild, .deny]
         let mode = DebugApproval.custom { request in
-            purposes.append(request.purpose)
-            return request.purpose == .access ? .allowOnce : .deny
+            asked.append((request.purpose, request.detail))
+            return request.purpose == .access ? .allowOnce : patchAnswers.removeFirst()
         }
         let approvals = DebugApprovals(mode: mode, defaults: defaults, build: "abc1234")
         #expect(await approvals.allowed("Agent", appName: "App", timeout: .seconds(1)) == .allowed)
-        // Access does not carry over to patching, and a decline sticks for the launch.
-        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .declined)
-        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .declined)
-        #expect(purposes == [.access, .codePatching])
-        // "Always for this build" is honoured for access only.
-        let remembering = DebugApproval.custom { _ in .allowForBuild }
-        let first = DebugApprovals(mode: remembering, defaults: defaults, build: "x1")
-        #expect(await first.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .allowed)
-        let relaunch = DebugApprovals(mode: mode, defaults: defaults, build: "x1")
-        #expect(await relaunch.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .declined)
+        // Access does not carry over to patching, and a decline covers that patch only.
+        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, detail: "one", timeout: .seconds(1)) == .declined)
+        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, detail: "two", timeout: .seconds(1)) == .allowed)
+        // An allowance covers one patch: the next one asks again, and "always" is not honoured.
+        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, detail: "three", timeout: .seconds(1)) == .allowed)
+        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, detail: "four", timeout: .seconds(1)) == .declined)
+        #expect(asked.map(\.0) == [.access, .codePatching, .codePatching, .codePatching, .codePatching])
+        #expect(asked.dropFirst().map(\.1) == ["one", "two", "three", "four"])
+    }
+
+    @Test func patchesSentTogetherAreAskedSeparately() async {
+        let defaults = UserDefaults(suiteName: "DebugTraceApprovalTests-\(UUID().uuidString)")!
+        let count = Asked()
+        let mode = DebugApproval.custom { _ in
+            count.clients.append("asked")
+            try? await Task.sleep(for: .milliseconds(30))
+            return .allowOnce
+        }
+        let approvals = DebugApprovals(mode: mode, defaults: defaults, build: "abc1234")
+        async let first = approvals.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(2))
+        async let second = approvals.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(2))
+        #expect(await first == .allowed)
+        #expect(await second == .allowed)
+        #expect(count.clients.count == 2)
+    }
+
+    @Test func thePatchPromptSaysWhatIsLoading() {
+        let request = DebugApprovalRequest(client: "Agent", appName: "App", purpose: .codePatching,
+                                           detail: DebugTraceServer.patchDetail(["label": "App: Timer.swift", "patch": .string(String(repeating: "A", count: 4096))]))
+        #expect(request.message.contains("The client calls it: App: Timer.swift"))
+        #expect(request.message.contains("Size:"))
+        #expect(DebugTraceServer.patchDetail([:]).contains("(no label)"))
     }
 
     @Test func theInjectEndpointNeedsItsOwnAllowance() async throws {

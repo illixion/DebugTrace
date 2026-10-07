@@ -12,19 +12,23 @@ public struct DebugApprovalRequest: Sendable {
     public let client: String
     public let appName: String
     public let purpose: Purpose
+    /// For code patching, what is about to load (the client's label for the patch and its size).
+    /// The client chose the label, so the prompt says so.
+    public let detail: String?
 
     /// What the person is being asked to allow. Code patching is asked for
-    /// separately, and again for each launch, because it makes the app run
+    /// separately, and again for every patch, because it makes the app run
     /// code a client sent rather than only answering queries.
     public enum Purpose: Sendable {
         case access
         case codePatching
     }
 
-    public init(client: String, appName: String, purpose: Purpose = .access) {
+    public init(client: String, appName: String, purpose: Purpose = .access, detail: String? = nil) {
         self.client = client
         self.appName = appName
         self.purpose = purpose
+        self.detail = detail
     }
 
     /// The prompt's wording, shared by the system alert and DebugTraceUI's window.
@@ -37,13 +41,14 @@ public struct DebugApprovalRequest: Sendable {
         case .access:
             "\(client) wants to read \(appName)'s logs and run its debug commands."
         case .codePatching:
-            "\(client) wants to replace code in \(appName) while it runs. Only allow this if you started it."
+            "\(client) wants to replace code in \(appName) while it runs."
+                + (detail.map { "\n\n\($0)" } ?? "") + "\n\nOnly allow this if you started it."
         }
     }
 }
 
 public enum DebugApprovalDecision: Sendable {
-    /// Until the app quits.
+    /// Until the app quits (for code patching: this one patch).
     case allowOnce
     /// Every launch of this build (`CFBundleVersion`), for this client name.
     case allowForBuild

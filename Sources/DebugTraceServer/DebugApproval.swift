@@ -76,12 +76,14 @@ final class DebugApprovals {
     /// Whether `client` may be served. Waits up to `timeout` for the person at
     /// the device, including for prompts ahead of its own.
     func allowed(_ name: String, appName: String, purpose: DebugApprovalRequest.Purpose = .access,
-                 timeout: Duration) async -> Answer {
+                 detail: String? = nil, timeout: Duration) async -> Answer {
         if case .allowAll = mode { return .allowed }
-        // Patching is its own question: allowing a client to read says nothing
-        // about letting it run code, and it is never remembered across launches.
-        let client = purpose == .access ? name : "patch:" + name
-        if let decision = decided[client] { return decision ? .allowed : .declined }
+        // Patching is its own question, asked for every patch: allowing a client
+        // to read says nothing about letting it run code, and neither an allow
+        // nor a decline carries over to the next patch. Each call gets a key of
+        // its own, so two patches sent together are two prompts, never one answer.
+        let client = purpose == .access ? name : "patch:\(UUID().uuidString)"
+        if purpose == .access, let decision = decided[client] { return decision ? .allowed : .declined }
         if purpose == .access, (defaults.stringArray(forKey: rememberedKey) ?? []).contains(client) {
             decided[client] = true
             return .allowed
@@ -89,7 +91,7 @@ final class DebugApprovals {
         if purpose == .access, pending[client] == nil, let silence { return .silenced(until: silence) }
         let task = pending[client] ?? {
             let task = Task { @MainActor [weak self] () -> Answer in
-                await self?.prompt(client, name: name, appName: appName, purpose: purpose) ?? .declined
+                await self?.prompt(client, name: name, appName: appName, purpose: purpose, detail: detail) ?? .declined
             }
             pending[client] = task
             return task
@@ -112,7 +114,7 @@ final class DebugApprovals {
 
     /// One client's turn at the screen, queued behind any prompt already up.
     private func prompt(_ client: String, name: String, appName: String,
-                        purpose: DebugApprovalRequest.Purpose) async -> Answer {
+                        purpose: DebugApprovalRequest.Purpose, detail: String?) async -> Answer {
         await takeTurn()
         defer { endTurn() }
         defer { pending[client] = nil }
@@ -120,7 +122,7 @@ final class DebugApprovals {
         // Everyone who asked gave up while it queued: a flood of names left
         // behind no stack of prompts. The next request asks afresh.
         guard waiting[client, default: 0] > 0 else { return .waiting }
-        let request = DebugApprovalRequest(client: name, appName: appName, purpose: purpose)
+        let request = DebugApprovalRequest(client: name, appName: appName, purpose: purpose, detail: detail)
         let decision: DebugApprovalDecision
         let chime = chimeWhilePrompting(DebugApprovalChime.Kind(purpose))
         defer { chime?.cancel() }
@@ -129,6 +131,8 @@ final class DebugApprovals {
         case .ask: decision = await DebugApprovalPrompt.ask(request)
         case .allowAll: decision = .allowOnce
         }
+        // One patch, one answer: nothing about it is kept.
+        if purpose == .codePatching { return decision == .deny ? .declined : .allowed }
         switch decision {
         case .allowOnce:
             decided[client] = true
@@ -218,7 +222,7 @@ enum DebugApprovalPrompt {
         }
         let buttons: [(String, DebugApprovalDecision)] = request.purpose == .access
             ? [("Allow", .allowOnce), ("Always for This Build", .allowForBuild)]
-            : [("Allow Once", .allowOnce)]
+            : [("Allow This Patch", .allowOnce)]
         return await alert(title: request.title, message: request.message, buttons: buttons,
                            cancel: ("Don't Allow", .deny))
     }

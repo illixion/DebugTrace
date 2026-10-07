@@ -441,8 +441,9 @@ public final class DebugTraceServer {
             guard let body = try? JSONValue.parse(request.body), let name = body["name"]?.stringValue else {
                 return (errorResponse(.invalidArgument(#"body must be {"name": "<endpoint>", "arguments": {...}}"#)), nil)
             }
-            if let failure = await gateCodePatching(name, for: request) { return (errorResponse(failure, endpoint: name), nil) }
-            return await invoke(name, arguments: body["arguments"]?.objectValue ?? [:], pretty: false)
+            let callArguments = body["arguments"]?.objectValue ?? [:]
+            if let failure = await gateCodePatching(name, arguments: callArguments, for: request) { return (errorResponse(failure, endpoint: name), nil) }
+            return await invoke(name, arguments: callArguments, pretty: false)
         default:
             break
         }
@@ -481,7 +482,7 @@ public final class DebugTraceServer {
             }
             arguments.merge(object) { _, fromBody in fromBody }
         }
-        if let failure = await gateCodePatching(name, for: request) { return (errorResponse(failure, endpoint: name), nil) }
+        if let failure = await gateCodePatching(name, arguments: arguments, for: request) { return (errorResponse(failure, endpoint: name), nil) }
         return await invoke(name, arguments: arguments, pretty: pretty)
     }
 
@@ -552,35 +553,52 @@ public final class DebugTraceServer {
         return await surface.call(name, arguments: arguments)
     }
 
-    /// Endpoints that make the app run code a client sent. Each needs its own
-    /// allowance on the device, per client and per launch, on top of access.
+    /// Endpoints that make the app run code a client sent. Each call needs its own
+    /// allowance on the device, one per patch, on top of access.
     nonisolated static let codePatchingEndpoints: Set<String> = ["_inject"]
 
     /// Nil unless `name` loads code and the person at the device hasn't allowed that.
-    func gateCodePatching(_ name: String, for request: HTTPRequest) async -> DebugError? {
+    func gateCodePatching(_ name: String, arguments: [String: JSONValue] = [:], for request: HTTPRequest) async -> DebugError? {
         guard Self.codePatchingEndpoints.contains(name) else { return nil }
-        return await approve(request, purpose: .codePatching)
+        return await approve(request, purpose: .codePatching, detail: Self.patchDetail(arguments))
     }
 
-    /// Nil when the person at the device has allowed this client for this launch.
-    private func approve(_ request: HTTPRequest, purpose: DebugApprovalRequest.Purpose = .access) async -> DebugError? {
+    /// What the prompt shows about a patch: the label the client gave it and its size.
+    /// The label is the client's own words, so the prompt says whose they are.
+    nonisolated static func patchDetail(_ arguments: [String: JSONValue]) -> String {
+        let label = arguments["label"]?.stringValue.map { String($0.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.prefix(120)) }
+        let bytes = (arguments["patch"]?.stringValue?.utf8.count ?? 0) / 4 * 3
+        var lines = ["The client calls it: \(label ?? "(no label)")"]
+        if bytes > 0 { lines.append("Size: \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Nil when the person at the device has allowed this client (for this launch, or for
+    /// this one patch).
+    private func approve(_ request: HTTPRequest, purpose: DebugApprovalRequest.Purpose = .access,
+                         detail: String? = nil) async -> DebugError? {
         let client = DebugApprovals.clientName(header: request.header("x-debugtrace-client"),
                                                userAgent: request.header("user-agent"))
         let appName = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
             ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "this app"
         let what = purpose == .access ? "debug access" : "code changes"
-        switch await approvals.allowed(client, appName: appName, purpose: purpose, timeout: configuration.approvalTimeout) {
+        switch await approvals.allowed(client, appName: appName, purpose: purpose, detail: detail,
+                                           timeout: configuration.approvalTimeout) {
         case .allowed:
             return nil
         case .declined:
             return DebugError(.forbidden, "\(what) for \"\(client)\" was declined on the device",
-                              hint: "relaunch the app to be asked again, and choose Allow")
+                              hint: purpose == .codePatching
+                                  ? "the person declined this patch; nothing was applied. Ask them before sending it again: every patch asks"
+                                  : "relaunch the app to be asked again, and choose Allow")
         case .silenced(let until):
             return DebugError(.forbidden, "the device is refusing new debug clients without asking, until \(DebugTime.iso(until))",
                               hint: "after declining requests, the person at the device silenced the prompt; relaunch the app to be asked again")
         case .waiting:
             return DebugError(.forbidden, "waiting for someone to allow \(what) for \"\(client)\" on the device",
-                              hint: "accept the prompt in the app (it must be in the foreground), then retry")
+                              hint: purpose == .codePatching
+                                  ? "ask the person to tap Allow on the device, then call inject again: an allowance covers one patch, so a prompt that was answered after this reply does not apply to the retry"
+                                  : "accept the prompt in the app (it must be in the foreground), then retry")
         }
     }
 

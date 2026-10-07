@@ -152,7 +152,7 @@ struct DebugApprovalView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 VStack(spacing: 10) {
-                    Button(request.purpose == .access ? "Allow" : "Allow Once") { center.respond(.access(.allowOnce)) }
+                    Button(request.purpose == .access ? "Allow" : "Allow This Patch") { center.respond(.access(.allowOnce)) }
                         .buttonStyle(.borderedProminent)
                     if request.purpose == .access {
                         Button("Always for This Build") { center.respond(.access(.allowForBuild)) }
