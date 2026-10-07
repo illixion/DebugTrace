@@ -2,7 +2,13 @@
 // of @_dynamicReplacement extensions, for `debugtrace-inject`.
 //
 //   debugtrace-rewrite --old OLD.swift --new NEW.swift --module M --source-file NAME.swift --out PATCH.swift
-//                      [--config BUILD.json]
+//                      [--config BUILD.json] [--built BUILT.swift]
+//
+// With --built (the file as the app was built), methods that an earlier patch
+// added are known: the app has no such symbol to replace, so a change to one,
+// or to a patched function that calls one, re-emits the whole accumulated patch
+// of the file in this dylib (added methods copied again, every function that
+// differs from the build replaced again). Later patches override earlier ones.
 //
 // Prints a JSON report on stdout. Functions and computed properties whose body
 // changed are replaced; new methods and types are copied over as they are;
@@ -27,6 +33,8 @@ struct Report: Encodable {
     var unchanged = 0
     var removed: [String] = []
     var hasPatch = false
+    /// This patch restates everything earlier patches did to the file (see --built).
+    var cumulative = false
 
     struct Problem: Encodable {
         let decl: String
@@ -303,9 +311,38 @@ for id in old.shapes.keys where new.shapes[id] == nil && !id.hasSuffix(" header"
 var body = ""
 var number = 0
 var addedPaths = Set<String>()
+
+/// What the running app has as built, when known. A callable that the live file
+/// has and the build lacks was added by an earlier patch, so it exists only in
+/// that patch's dylib and cannot be a @_dynamicReplacement target.
+let built: Index? = argument("--built").flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }.map(index)
+let earlierAdded = Set(old.callables.keys.filter { built != nil && built!.callables[$0] == nil })
+let cumulative = !earlierAdded.isEmpty
+if cumulative { report.cumulative = true }
+
 for key in new.order {
     guard let callable = new.callables[key] else { continue }
     if belongsToNewType(callable.path) { continue }
+    if cumulative, let built = built {
+        // This patch is compiled against the app alone: whatever an earlier patch
+        // added or replaced is restated, so that code calling it still resolves.
+        let label = (callable.path.isEmpty ? "" : callable.path + ".") + callable.selector
+        if let original = built.callables[key] {
+            if original.bodyTokens == callable.bodyTokens {
+                report.unchanged += 1
+                continue
+            }
+            number += 1
+            guard let text = replacementText(for: callable, number: number, tag: fileTag(sourceFile)) else { continue }
+            body += wrapped(text, in: callable.path) + "\n\n"
+            report.patched.append(label)
+        } else if built.types[callable.path] != nil || callable.path.isEmpty {
+            body += wrapped(callable.node.description, in: callable.path) + "\n\n"
+            report.added.append(label)
+            addedPaths.insert(callable.path)
+        }
+        continue
+    }
     if let before = old.callables[key] {
         if before.bodyTokens == callable.bodyTokens {
             report.unchanged += 1

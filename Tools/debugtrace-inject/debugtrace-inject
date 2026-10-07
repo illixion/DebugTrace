@@ -412,7 +412,9 @@ def command_patch(options):
                 json.dump(build_configuration(state["modules"][module], compiler), handle)
         run = subprocess.run([tool, "--old", os.path.join(live, path.lstrip("/")), "--new", path, "--module", module,
                               "--source-file", os.path.basename(path), "--out", patch_file,
-                              "--config", config_file],
+                              "--config", config_file]
+                             + (["--built", os.path.join(built, path.lstrip("/"))]
+                                if os.path.isfile(os.path.join(built, path.lstrip("/"))) else []),
                              capture_output=True, text=True)
         if run.returncode != 0:
             raise Failure(f"{os.path.basename(path)} does not parse", "fix the syntax error and inject again",

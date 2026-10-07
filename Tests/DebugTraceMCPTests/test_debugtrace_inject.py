@@ -217,16 +217,23 @@ class RewriterTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tool = inject.rewriter()
 
-    def run_rewriter(self, new):
+    def run_rewriter(self, new, old=None, built=None):
         import subprocess
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         paths = {name: os.path.join(directory, name) for name in ("old.swift", "new.swift", "out.swift")}
-        for name, text in (("old.swift", OLD), ("new.swift", new)):
+        for name, text in (("old.swift", OLD if old is None else old), ("new.swift", new)):
             with open(paths[name], "w") as handle:
                 handle.write(text)
+        extra = []
+        if built is not None:
+            paths["built.swift"] = os.path.join(directory, "built.swift")
+            with open(paths["built.swift"], "w") as handle:
+                handle.write(built)
+            extra = ["--built", paths["built.swift"]]
         done = subprocess.run([self.tool, "--old", paths["old.swift"], "--new", paths["new.swift"], "--module", "App",
-                               "--source-file", "Model.swift", "--out", paths["out.swift"]], capture_output=True, text=True)
+                               "--source-file", "Model.swift", "--out", paths["out.swift"]] + extra,
+                              capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
         with open(paths["out.swift"]) as handle:
             return json.loads(done.stdout), handle.read()
@@ -255,6 +262,26 @@ class RewriterTests(unittest.TestCase):
         self.assertEqual(report["patched"], [])
         self.assertIn("func fresh", patch)
         self.assertNotIn("_dynamicReplacement(for: fresh", patch)
+
+    def test_a_method_an_earlier_patch_added_can_be_changed_again(self):
+        fresh = OLD.replace("func value() -> Int { base }",
+                            "func value() -> Int { fresh(1) }\n    func fresh(_ x: Int) -> Int { x }")
+        later = fresh.replace("func fresh(_ x: Int) -> Int { x }", "func fresh(_ x: Int) -> Int { x + 1 }")
+        report, patch = self.run_rewriter(later, old=fresh, built=OLD)
+        self.assertTrue(report["cumulative"])
+        self.assertEqual(report["unpatchable"], [])
+        # The new body is copied, never named as a replacement target the app doesn't have...
+        self.assertIn("func fresh(_ x: Int) -> Int { x + 1 }", patch)
+        self.assertNotIn("_dynamicReplacement(for: fresh", patch)
+        # ...and the earlier-patched caller is restated so it reaches this copy.
+        self.assertIn("@_dynamicReplacement(for: value())", patch)
+        self.assertEqual(report["patched"], ["Thing.value()"])
+        self.assertEqual(report["added"], ["Thing.fresh(_:)"])
+
+    def test_without_an_earlier_added_method_the_patch_is_not_cumulative(self):
+        report, _ = self.run_rewriter(OLD.replace('"hello v1"', '"hello v2"'), built=OLD)
+        self.assertFalse(report["cumulative"])
+        self.assertEqual(report["patched"], ["greeting()"])
 
     def test_labels_make_the_selector(self):
         report, patch = self.run_rewriter(OLD.replace('"tick"', '"tock"'))

@@ -369,7 +369,17 @@ def live_sessions():
 def describe(session):
     # Never the token.
     keys = ("appName", "bundleId", "build", "device", "url", "startedAt", "consoleLog", "source", "attachable", "reason")
-    return {key: session[key] for key in keys if session.get(key) is not None}
+    described = {key: session[key] for key in keys if session.get(key) is not None}
+    # From the session record alone: listing apps sends no request to any of them.
+    if session.get("injectDir"):
+        described["inject"] = {"ready": True, "note": "launched with --inject: edit Swift files, then call `inject`"}
+    elif session.get("source") == "bonjour":
+        described["inject"] = {"ready": "unknown", "note": "attached without a launch record; `inject` finds out when called, "
+                                                           "or relaunch with `build-and-sign --mcp --inject`"}
+    else:
+        described["inject"] = {"ready": False, "note": "not launched with --inject; `inject` needs "
+                                                       "`build-and-sign --mcp --inject` from the app's repo"}
+    return described
 
 
 def resolve(app):

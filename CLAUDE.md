@@ -333,6 +333,8 @@ App Store build, has no such file. Layers of opt-out: don't pass `--inject`;
 `register()` still works for an app that wants it compiled in. `--inject` also sets
 `DEAD_CODE_STRIPPING=NO`. Verified on the real xrTimer (28 s build+deploy, no source change).
 
+**Seeing whether it is on, and patching twice.** `apps` lists `inject: {ready: true | false | "unknown"}` per app, from the session record (`injectDir`) alone, since listing apps sends no request; `unknown` is a Bonjour attach with no record. A method an earlier patch added exists only in that patch's dylib, so it cannot be a `@_dynamicReplacement` target; when the live file holds such a method the rewriter (given `--built`, the file as built) restates the file's whole accumulated patch in the new dylib (added methods copied again, every function that differs from the build replaced again), and the report says `cumulative`. Types an earlier patch added are not restated.
+
 **Costs to know.** Implicit-dynamic makes every call to a replaceable function indirect and blocks
 inlining, so an `--inject` build is not the shipping binary's performance: Oneiros spent 28-35% more
 CPU in its frame work (measure with a normal build). `INJECT_SCOPE=app` (a repo conf, or the

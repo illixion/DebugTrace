@@ -195,6 +195,13 @@ class Discovery(unittest.TestCase):
         self.assertEqual(session["device"], "ixPhone")
         self.assertNotIn("token", mcp.describe(session))
 
+    def test_apps_says_whether_live_patching_is_ready(self):
+        launched = mcp.describe({"appName": "A", "injectDir": "/p/build/inject"})
+        self.assertIs(launched["inject"]["ready"], True)
+        self.assertNotIn("/p/build/inject", json.dumps(launched))
+        self.assertIs(mcp.describe({"appName": "A", "source": "record"})["inject"]["ready"], False)
+        self.assertEqual(mcp.describe({"appName": "A", "source": "bonjour"})["inject"]["ready"], "unknown")
+
     def test_unknown_or_tokenless_builds_are_listed_but_not_attachable(self):
         session, = mcp.discovered_sessions(mcp.parse_zone(ZONE))
         self.assertFalse(session["attachable"])
