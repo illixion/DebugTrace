@@ -10,6 +10,7 @@ working in another repo can read just the page it needs.
 | Log through `DebugLogger`, decide what is private | [logging-and-privacy.md](logging-and-privacy.md) |
 | Register endpoints, understand the API an LLM sees | [endpoints.md](endpoints.md) |
 | Know when the server runs, who may use it, how it is secured | [server-and-security.md](server-and-security.md) |
+| Find out what a broken app looks like and holds | [inspecting-a-running-app.md](inspecting-a-running-app.md) |
 | Edit code in a running app (`inject`) and refresh SwiftUI | [live-patching.md](live-patching.md) |
 | Understand the debug trace zip and its wire formats | [traces.md](traces.md) |
 | Know why it is a separate package, its threading rules, who uses it | [design.md](design.md) |

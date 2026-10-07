@@ -22,6 +22,9 @@ public struct DebugApprovalRequest: Sendable {
     public enum Purpose: Sendable {
         case access
         case codePatching
+        /// A screenshot, or the text of what is on screen: personal content that
+        /// debug access alone does not cover.
+        case screenCapture
     }
 
     public init(client: String, appName: String, purpose: Purpose = .access, detail: String? = nil) {
@@ -33,7 +36,11 @@ public struct DebugApprovalRequest: Sendable {
 
     /// The prompt's wording, shared by the system alert and DebugTraceUI's window.
     public var title: String {
-        purpose == .access ? "Allow debug access?" : "Allow code changes?"
+        switch purpose {
+        case .access: "Allow debug access?"
+        case .codePatching: "Allow code changes?"
+        case .screenCapture: "Allow screen capture?"
+        }
     }
 
     public var message: String {
@@ -43,13 +50,22 @@ public struct DebugApprovalRequest: Sendable {
         case .codePatching:
             "\(client) wants to replace code in \(appName) while it runs."
                 + (detail.map { "\n\n\($0)" } ?? "") + "\n\nOnly allow this if you started it."
+        case .screenCapture:
+            "\(client) wants to see what \(appName) is showing"
+                + (detail.map { ": \($0)" } ?? ".") + "\n\nIt can include anything on screen. Only allow this if you asked for it."
         }
     }
 }
 
 public enum DebugApprovalDecision: Sendable {
+    /// How long "Allow for 15 Minutes" lasts.
+    public static let screenWindow: Duration = .seconds(15 * 60)
+
     /// Until the app quits (for code patching: this one patch).
     case allowOnce
+    /// Screen capture only: this client may capture for `DebugApprovalDecision.screenWindow`.
+    /// Anywhere else it counts as `allowOnce`.
+    case allowForAWhile
     /// Every launch of this build (`CFBundleVersion`), for this client name.
     case allowForBuild
     case deny

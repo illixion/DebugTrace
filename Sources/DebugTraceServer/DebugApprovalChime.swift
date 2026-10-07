@@ -30,7 +30,7 @@ enum DebugApprovalChime {
         case codePatching
 
         init(_ purpose: DebugApprovalRequest.Purpose) {
-            self = purpose == .access ? .access : .codePatching
+            self = purpose == .codePatching ? .codePatching : .access
         }
     }
 

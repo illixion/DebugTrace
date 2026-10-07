@@ -140,11 +140,27 @@ public struct DebugApprovalWindow: Scene {
 struct DebugApprovalView: View {
     private var center = DebugApprovalCenter.shared
 
+    private static func symbol(for purpose: DebugApprovalRequest.Purpose) -> String {
+        switch purpose {
+        case .access: "ladybug"
+        case .codePatching: "curlybraces"
+        case .screenCapture: "camera.viewfinder"
+        }
+    }
+
+    private static func allowLabel(for purpose: DebugApprovalRequest.Purpose) -> String {
+        switch purpose {
+        case .access: "Allow"
+        case .codePatching: "Allow This Patch"
+        case .screenCapture: "Allow This Capture"
+        }
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             switch center.prompt {
             case .access(let request)?:
-                Image(systemName: request.purpose == .access ? "ladybug" : "curlybraces")
+                Image(systemName: Self.symbol(for: request.purpose))
                     .font(.system(size: 40))
                 Text(request.title)
                     .font(.title2.bold())
@@ -152,10 +168,13 @@ struct DebugApprovalView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 VStack(spacing: 10) {
-                    Button(request.purpose == .access ? "Allow" : "Allow This Patch") { center.respond(.access(.allowOnce)) }
+                    Button(Self.allowLabel(for: request.purpose)) { center.respond(.access(.allowOnce)) }
                         .buttonStyle(.borderedProminent)
                     if request.purpose == .access {
                         Button("Always for This Build") { center.respond(.access(.allowForBuild)) }
+                    }
+                    if request.purpose == .screenCapture {
+                        Button("Allow for 15 Minutes") { center.respond(.access(.allowForAWhile)) }
                     }
                     Button("Don't Allow", role: .cancel) { center.respond(.access(.deny)) }
                 }

@@ -84,6 +84,13 @@ text and locations are personal.
     immersive-only app has no window for it at all. `.custom(_:silence:)` is for
     an app's own UI; `.allowAll` is for tests. `debugtrace-mcp` calls itself "An agent on
     <host>" (`DEBUGTRACE_CLIENT_NAME` overrides), the appstore page "App Store page on <host>".
+- **Three questions, asked differently.** Debug access (above) is asked once per client, optionally
+  for the build. **Code changes** (`_inject`) are asked for every patch and never remembered
+  ([live-patching.md](live-patching.md)). **Screen capture** (`_screenshot`, `_screen`) is asked for
+  every call, with "Allow for 15 Minutes" as the only way to skip asking again
+  ([inspecting-a-running-app.md](inspecting-a-running-app.md)). Each is its own `DebugApprovalRequest.Purpose`;
+  allowing one says nothing about the others, and a decline of the latter two does not count toward the
+  silence offer.
 - **Loopback is not exempt:** on iOS, other apps on the same device can reach 127.0.0.1.
 - **Browsers are refused.** Any non-GET request carrying `Origin` gets a 403, so a web page
   can't POST commands through the user's browser. No CORS headers are sent. The old server

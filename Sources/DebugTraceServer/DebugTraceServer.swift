@@ -238,6 +238,10 @@ public final class DebugTraceServer {
         }
         if configuration.loadsPatchRuntime { DebugPatchRuntimeLoader.loadIfEmbedded(log: log) }
         if surface.endpoint(named: "_profile") == nil { surface.register(DebugProfiler.endpoint) }
+        // What is on screen is personal: a release build never offers it.
+        if DebugTrace.privacy != .release {
+            for endpoint in DebugScreenCapture.endpoints where surface.endpoint(named: endpoint.name) == nil { surface.register(endpoint) }
+        }
         let candidates = (lastPort.map { [$0] } ?? []) + configuration.ports.filter { $0 != lastPort }
         for candidate in candidates {
             do {
@@ -442,7 +446,7 @@ public final class DebugTraceServer {
                 return (errorResponse(.invalidArgument(#"body must be {"name": "<endpoint>", "arguments": {...}}"#)), nil)
             }
             let callArguments = body["arguments"]?.objectValue ?? [:]
-            if let failure = await gateCodePatching(name, arguments: callArguments, for: request) { return (errorResponse(failure, endpoint: name), nil) }
+            if let failure = await gateSensitive(name, arguments: callArguments, for: request) { return (errorResponse(failure, endpoint: name), nil) }
             return await invoke(name, arguments: callArguments, pretty: false)
         default:
             break
@@ -482,7 +486,7 @@ public final class DebugTraceServer {
             }
             arguments.merge(object) { _, fromBody in fromBody }
         }
-        if let failure = await gateCodePatching(name, arguments: arguments, for: request) { return (errorResponse(failure, endpoint: name), nil) }
+        if let failure = await gateSensitive(name, arguments: arguments, for: request) { return (errorResponse(failure, endpoint: name), nil) }
         return await invoke(name, arguments: arguments, pretty: pretty)
     }
 
@@ -557,10 +561,20 @@ public final class DebugTraceServer {
     /// allowance on the device, one per patch, on top of access.
     nonisolated static let codePatchingEndpoints: Set<String> = ["_inject"]
 
-    /// Nil unless `name` loads code and the person at the device hasn't allowed that.
-    func gateCodePatching(_ name: String, arguments: [String: JSONValue] = [:], for request: HTTPRequest) async -> DebugError? {
-        guard Self.codePatchingEndpoints.contains(name) else { return nil }
-        return await approve(request, purpose: .codePatching, detail: Self.patchDetail(arguments))
+    /// Endpoints that show what is on screen. Asked for every call, or once for 15 minutes.
+    nonisolated static let screenCaptureEndpoints: Set<String> = ["_screenshot", "_screen"]
+
+    /// Nil unless the person at the device has allowed what `name` does, when it is one of the
+    /// endpoints that need more than debug access: loading code (every patch) or capturing the screen.
+    func gateSensitive(_ name: String, arguments: [String: JSONValue] = [:], for request: HTTPRequest) async -> DebugError? {
+        if Self.codePatchingEndpoints.contains(name) {
+            return await approve(request, purpose: .codePatching, detail: Self.patchDetail(arguments))
+        }
+        if Self.screenCaptureEndpoints.contains(name) {
+            return await approve(request, purpose: .screenCapture,
+                                 detail: name == "_screenshot" ? "a screenshot of its windows" : "the text of what is on screen")
+        }
+        return nil
     }
 
     /// What the prompt shows about a patch: the label the client gave it and its size.
@@ -573,6 +587,22 @@ public final class DebugTraceServer {
         return lines.joined(separator: "\n")
     }
 
+    nonisolated static func declinedHint(_ purpose: DebugApprovalRequest.Purpose) -> String {
+        switch purpose {
+        case .access: "relaunch the app to be asked again, and choose Allow"
+        case .codePatching: "the person declined this patch; nothing was applied. Ask them before sending it again: every patch asks"
+        case .screenCapture: "the person declined this capture. Ask them before trying again: each capture asks unless they chose Allow for 15 Minutes"
+        }
+    }
+
+    nonisolated static func waitingHint(_ purpose: DebugApprovalRequest.Purpose) -> String {
+        switch purpose {
+        case .access: "accept the prompt in the app (it must be in the foreground), then retry"
+        case .codePatching: "ask the person to tap Allow on the device, then call inject again: an allowance covers one patch, so a prompt that was answered after this reply does not apply to the retry"
+        case .screenCapture: "ask the person to tap Allow on the device (Allow for 15 Minutes stops it asking again), then retry"
+        }
+    }
+
     /// Nil when the person at the device has allowed this client (for this launch, or for
     /// this one patch).
     private func approve(_ request: HTTPRequest, purpose: DebugApprovalRequest.Purpose = .access,
@@ -581,24 +611,20 @@ public final class DebugTraceServer {
                                                userAgent: request.header("user-agent"))
         let appName = (Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String)
             ?? (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "this app"
-        let what = purpose == .access ? "debug access" : "code changes"
+        let what = switch purpose { case .access: "debug access"; case .codePatching: "code changes"; case .screenCapture: "screen capture" }
         switch await approvals.allowed(client, appName: appName, purpose: purpose, detail: detail,
                                            timeout: configuration.approvalTimeout) {
         case .allowed:
             return nil
         case .declined:
             return DebugError(.forbidden, "\(what) for \"\(client)\" was declined on the device",
-                              hint: purpose == .codePatching
-                                  ? "the person declined this patch; nothing was applied. Ask them before sending it again: every patch asks"
-                                  : "relaunch the app to be asked again, and choose Allow")
+                              hint: Self.declinedHint(purpose))
         case .silenced(let until):
             return DebugError(.forbidden, "the device is refusing new debug clients without asking, until \(DebugTime.iso(until))",
                               hint: "after declining requests, the person at the device silenced the prompt; relaunch the app to be asked again")
         case .waiting:
             return DebugError(.forbidden, "waiting for someone to allow \(what) for \"\(client)\" on the device",
-                              hint: purpose == .codePatching
-                                  ? "ask the person to tap Allow on the device, then call inject again: an allowance covers one patch, so a prompt that was answered after this reply does not apply to the retry"
-                                  : "accept the prompt in the app (it must be in the foreground), then retry")
+                              hint: Self.waitingHint(purpose))
         }
     }
 

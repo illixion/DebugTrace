@@ -6,6 +6,11 @@ import Testing
 /// The device-side prompt in front of every authenticated request.
 @MainActor
 @Suite(.serialized) struct ApprovalTests {
+    final class Clock: @unchecked Sendable {
+        var now: Date
+        init(_ now: Date) { self.now = now }
+    }
+
     final class Asked: @unchecked Sendable {
         var clients: [String] = []
         var offers = 0
@@ -160,6 +165,61 @@ import Testing
         #expect(request.message.contains("The client calls it: App: Timer.swift"))
         #expect(request.message.contains("Size:"))
         #expect(DebugTraceServer.patchDetail([:]).contains("(no label)"))
+    }
+
+    @Test func aScreenCaptureAsksEachTimeUnlessAllowedForFifteenMinutes() async {
+        let defaults = UserDefaults(suiteName: "DebugTraceApprovalTests-\(UUID().uuidString)")!
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        var answers: [DebugApprovalDecision] = [.allowOnce, .deny, .allowForAWhile]
+        var asked = 0
+        let mode = DebugApproval.custom { _ in
+            asked += 1
+            return answers.removeFirst()
+        }
+        let approvals = DebugApprovals(mode: mode, defaults: defaults, build: "abc1234", now: { clock.now })
+        func capture(_ name: String = "Agent") async -> DebugApprovals.Answer {
+            await approvals.allowed(name, appName: "App", purpose: .screenCapture, detail: "a screenshot", timeout: .seconds(1))
+        }
+        #expect(await capture() == .allowed)      // this capture only
+        #expect(await capture() == .declined)     // asked again; a decline covers one capture
+        #expect(await capture() == .allowed)      // "for 15 minutes"
+        #expect(asked == 3)
+        clock.now.addTimeInterval(14 * 60)
+        #expect(await capture() == .allowed)      // still inside the window: not asked
+        #expect(asked == 3)
+        // The window belongs to the client that was allowed, and covers screens only.
+        answers = [.deny, .deny]
+        #expect(await capture("Other") == .declined)
+        #expect(await approvals.allowed("Agent", appName: "App", purpose: .codePatching, timeout: .seconds(1)) == .declined)
+        #expect(asked == 5)
+        clock.now.addTimeInterval(2 * 60)
+        answers = [.allowOnce]
+        #expect(await capture() == .allowed)      // expired: asked again
+        #expect(asked == 6)
+    }
+
+    @Test func theScreenEndpointsAreGatedAndNeverServedWithoutAnAllowance() async throws {
+        let surface = DebugSurface()
+        surface.register(.query("_screen", "what is on screen") { _ in ["ok": true] })
+        surface.register(.query("other", "something else") { _ in ["ok": true] })
+        var purposes: [DebugApprovalRequest.Purpose] = []
+        let server = DebugTraceServer(surface: surface, configuration: .init(
+            ports: 0...0, binding: .loopback, authentication: .token("t"),
+            approval: .custom { request in purposes.append(request.purpose); return request.purpose == .access ? .allowOnce : .deny }))
+        let base = URL(string: "http://127.0.0.1:\(try await server.start())")!
+        defer { server.stop() }
+        func get(_ name: String) async throws -> (Int, JSONValue) {
+            var request = URLRequest(url: base.appendingPathComponent(name))
+            request.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+            request.setValue("Agent", forHTTPHeaderField: "X-DebugTrace-Client")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            return ((response as! HTTPURLResponse).statusCode, try JSONValue.parse(data))
+        }
+        #expect(try await get("other").0 == 200)
+        let (status, body) = try await get("_screen")
+        #expect(status == 403)
+        #expect(body["error"]?["message"]?.stringValue?.contains("screen capture") == true)
+        #expect(purposes == [.access, .screenCapture])
     }
 
     @Test func theInjectEndpointNeedsItsOwnAllowance() async throws {

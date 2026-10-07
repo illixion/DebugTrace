@@ -15,7 +15,7 @@ up in all three. That is the whole design.
 |---|---|---|
 | `DebugTrace` | `Sources/DebugTrace` | `DebugLogger` + log buffer (`DebugLogger.swift`), `DebugSurface` registry with `DebugEndpoint`/`DebugParameter`, trace builder and zip, log reader, breadcrumbs, redactor, credential. Links nothing. |
 | `DebugTraceUI` | `Sources/DebugTraceUI` | `DebugTraceView`/`DebugTraceButton`, `DebugApprovalWindow`, `DebugPatchRefresh` (`@PatchRefresh` and friends) |
-| `DebugTraceServer` | `Sources/DebugTraceServer` | HTTP + MCP listener, approval, `_profile` (`DebugProfiler` over the C walker `DebugTraceSampler`), patch-runtime loader |
+| `DebugTraceServer` | `Sources/DebugTraceServer` | HTTP + MCP listener, approval, `_profile` (`DebugProfiler` over the C walker `DebugTraceSampler`), `_screenshot`/`_screen` (`DebugScreenCapture`), patch-runtime loader |
 | `DebugTraceInject` | `Sources/DebugTraceInject` | `_inject` / `_patches`: loads a signed patch dylib. Embedded by `build-and-sign --inject`, never linked by apps. |
 | `debugtrace-mcp` | `Tools/debugtrace-mcp` | the `apps` MCP server every agent uses (stdio, no dependencies): `apps`, `help`, `call`, `trace`, `inject` |
 | `debugtrace-inject` | `Tools/debugtrace-inject` | patch pipeline: the Python driver `debugtrace-inject` and the SwiftSyntax `Rewriter/` |
@@ -32,6 +32,7 @@ Tests: `Tests/DebugTraceTests`, `…ServerTests`, `…InjectTests` (Swift) and `
 | `DebugLogger`, privacy levels, release mode | [logging-and-privacy.md](Docs/logging-and-privacy.md) |
 | Endpoint design rules, the envelope, MCP | [endpoints.md](Docs/endpoints.md) |
 | When the server runs, tokens, approval, Bonjour, confidential profile | [server-and-security.md](Docs/server-and-security.md) |
+| `_screenshot`, `_screen` and the other ways to inspect a broken app | [inspecting-a-running-app.md](Docs/inspecting-a-running-app.md) |
 | `inject`, the rewriter, SwiftUI refresh | [live-patching.md](Docs/live-patching.md) |
 | Trace layout, signing, upload | [traces.md](Docs/traces.md) |
 | Why a separate package, isolation, consumers | [design.md](Docs/design.md) |

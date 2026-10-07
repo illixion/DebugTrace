@@ -55,10 +55,15 @@ final class DebugApprovals {
     private var nextInLine: [CheckedContinuation<Void, Never>] = []
     private var declinesSinceOffer = 0
     private var silencedUntil: Date?
+    /// Clients the person allowed to capture the screen for a while, and until when.
+    private var screenAllowedUntil: [String: Date] = [:]
+    private let now: @Sendable () -> Date
 
     init(mode: DebugApproval, defaults: UserDefaults = .standard,
          build: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
-         silenceDuration: Duration = .seconds(3600), playsSound: Bool = false) {
+         silenceDuration: Duration = .seconds(3600), playsSound: Bool = false,
+         now: @escaping @Sendable () -> Date = { Date() }) {
+        self.now = now
         self.mode = mode
         self.playsSound = playsSound
         self.defaults = defaults
@@ -82,7 +87,9 @@ final class DebugApprovals {
         // to read says nothing about letting it run code, and neither an allow
         // nor a decline carries over to the next patch. Each call gets a key of
         // its own, so two patches sent together are two prompts, never one answer.
-        let client = purpose == .access ? name : "patch:\(UUID().uuidString)"
+        let client = purpose == .access ? name : "\(purpose):\(UUID().uuidString)"
+        // Screen capture can be allowed for a while, per client name, instead of per capture.
+        if purpose == .screenCapture, let until = screenAllowedUntil[name], until > now() { return .allowed }
         if purpose == .access, let decision = decided[client] { return decision ? .allowed : .declined }
         if purpose == .access, (defaults.stringArray(forKey: rememberedKey) ?? []).contains(client) {
             decided[client] = true
@@ -131,10 +138,18 @@ final class DebugApprovals {
         case .ask: decision = await DebugApprovalPrompt.ask(request)
         case .allowAll: decision = .allowOnce
         }
-        // One patch, one answer: nothing about it is kept.
+        // One patch, one answer: nothing about it is kept. A capture is the same, except for
+        // the person's explicit "for 15 minutes".
         if purpose == .codePatching { return decision == .deny ? .declined : .allowed }
+        if purpose == .screenCapture {
+            if decision == .allowForAWhile {
+                let (seconds, _) = DebugApprovalDecision.screenWindow.components
+                screenAllowedUntil[name] = now().addingTimeInterval(Double(seconds))
+            }
+            return decision == .deny ? .declined : .allowed
+        }
         switch decision {
-        case .allowOnce:
+        case .allowOnce, .allowForAWhile:
             decided[client] = true
         case .allowForBuild:
             decided[client] = true
@@ -220,9 +235,12 @@ enum DebugApprovalPrompt {
         if let presenter = DebugApprovalPresenter.current, let decision = await presenter.ask(request) {
             return decision
         }
-        let buttons: [(String, DebugApprovalDecision)] = request.purpose == .access
-            ? [("Allow", .allowOnce), ("Always for This Build", .allowForBuild)]
-            : [("Allow This Patch", .allowOnce)]
+        let buttons: [(String, DebugApprovalDecision)]
+        switch request.purpose {
+        case .access: buttons = [("Allow", .allowOnce), ("Always for This Build", .allowForBuild)]
+        case .codePatching: buttons = [("Allow This Patch", .allowOnce)]
+        case .screenCapture: buttons = [("Allow This Capture", .allowOnce), ("Allow for 15 Minutes", .allowForAWhile)]
+        }
         return await alert(title: request.title, message: request.message, buttons: buttons,
                            cancel: ("Don't Allow", .deny))
     }
