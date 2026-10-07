@@ -255,6 +255,16 @@ class RewriterTests(unittest.TestCase):
             report, _ = self.run_rewriter(OLD.replace(*change))
             self.assertTrue([p for p in report["unpatchable"] if expect in p["decl"]], (change, report["unpatchable"]))
 
+    def test_a_new_top_level_type_comes_along_whole_and_is_not_a_refusal(self):
+        helper = "\nprivate enum Beep {\n    static let hz = 1568.0\n    static func play() { print(hz) }\n    init() {}\n}\n"
+        report, patch = self.run_rewriter(OLD.replace('"hello v1"', '"hello v2"') + helper)
+        self.assertEqual(report["unpatchable"], [])
+        self.assertEqual(report["patched"], ["greeting()"])
+        self.assertEqual(report["added"], ["Beep"])
+        # Once, as the type itself: not again as methods added to an extension of it.
+        self.assertEqual(patch.count("static func play()"), 1)
+        self.assertNotIn("extension Beep", patch)
+
     def test_an_added_member_does_not_renumber_the_initializers(self):
         report, _ = self.run_rewriter(OLD.replace("var base = 1", "var base = 1\n    var extra = 3"))
         self.assertEqual([p["decl"] for p in report["unpatchable"]], ["Thing.var extra"])

@@ -263,13 +263,20 @@ var report = Report()
 let old = index(oldSource)
 let new = index(newSource)
 
+/// A top-level type that is new in this file comes along whole, members and all,
+/// so nothing inside it is a change to existing code.
+let newTypes = Set(new.types.keys.filter { old.types[$0] == nil && !$0.contains(".") && !$0.contains("#") })
+func belongsToNewType(_ id: String) -> Bool {
+    newTypes.contains { id == $0 || id.hasPrefix($0 + ".") || id.hasPrefix($0 + " ") }
+}
+
 // What a patch can't carry: any non-callable thing that differs.
-for (id, text) in new.shapes where old.shapes[id] != text {
+for (id, text) in new.shapes where old.shapes[id] != text && !belongsToNewType(id) {
     report.unpatchable.append(.init(decl: id, reason: old.shapes[id] == nil
         ? "a new stored property, initializer, or declaration that existing code can't see"
         : "a stored property, initializer, type header or other declaration changed"))
 }
-for (id, text) in new.opaque where old.opaque[id] != text {
+for (id, text) in new.opaque where old.opaque[id] != text && !belongsToNewType(id) {
     report.unpatchable.append(.init(decl: id, reason: "inside an #if block, which a patch can't tell apart"))
 }
 for id in old.shapes.keys where new.shapes[id] == nil && !id.hasSuffix(" header") {
@@ -281,6 +288,7 @@ var number = 0
 var addedPaths = Set<String>()
 for key in new.order {
     guard let callable = new.callables[key] else { continue }
+    if belongsToNewType(callable.path) { continue }
     if let before = old.callables[key] {
         if before.bodyTokens == callable.bodyTokens {
             report.unchanged += 1
