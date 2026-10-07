@@ -85,6 +85,9 @@ public final class DebugTraceServer {
         /// How long a request waits for that answer before it gets a 403
         /// saying the prompt is still open.
         public var approvalTimeout: Duration
+        /// Chime when a prompt is shown, and again every few seconds while it
+        /// waits: the prompt is easy to miss on a headset. On by default.
+        public var approvalSound: Bool
 
         public static let defaultPorts: ClosedRange<UInt16> = 8642...8691
 
@@ -92,7 +95,8 @@ public final class DebugTraceServer {
         public init(ports: ClosedRange<UInt16> = Configuration.defaultPorts, binding: Binding = .network,
                     authentication: Authentication = .automatic, maxBodyBytes: Int = 1 << 20,
                     redactsResponses: Bool = true, allowedInRelease: Bool = false, advertises: Bool = true,
-                    approval: DebugApproval = .ask, approvalTimeout: Duration = .seconds(60)) {
+                    approval: DebugApproval = .ask, approvalTimeout: Duration = .seconds(60),
+                    approvalSound: Bool = true) {
             self.ports = ports
             self.binding = binding
             self.authentication = authentication
@@ -102,6 +106,7 @@ public final class DebugTraceServer {
             self.advertises = advertises
             self.approval = approval
             self.approvalTimeout = approvalTimeout
+            self.approvalSound = approvalSound
         }
     }
 
@@ -120,7 +125,7 @@ public final class DebugTraceServer {
     private var lastPort: UInt16?
     private let queue = DispatchQueue(label: "DebugTraceServer")
     private lazy var mcp = MCPHandler(server: self)
-    private lazy var approvals = DebugApprovals(mode: configuration.approval)
+    private lazy var approvals = DebugApprovals(mode: configuration.approval, playsSound: configuration.approvalSound)
 
     public init(surface: DebugSurface = .shared, configuration: Configuration = Configuration()) {
         self.surface = surface

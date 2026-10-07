@@ -45,6 +45,7 @@ final class DebugApprovals {
     private let defaults: UserDefaults
     private let build: String
     private let silenceDuration: Duration
+    private let playsSound: Bool
     private var decided: [String: Bool] = [:]
     private var pending: [String: Task<Answer, Never>] = [:]
     /// Requests per client waiting on its prompt; a queued prompt whose
@@ -57,8 +58,9 @@ final class DebugApprovals {
 
     init(mode: DebugApproval, defaults: UserDefaults = .standard,
          build: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "",
-         silenceDuration: Duration = .seconds(3600)) {
+         silenceDuration: Duration = .seconds(3600), playsSound: Bool = false) {
         self.mode = mode
+        self.playsSound = playsSound
         self.defaults = defaults
         self.build = build
         self.silenceDuration = silenceDuration
@@ -115,6 +117,8 @@ final class DebugApprovals {
         guard waiting[client, default: 0] > 0 else { return .waiting }
         let request = DebugApprovalRequest(client: client, appName: appName)
         let decision: DebugApprovalDecision
+        let chime = chimeWhilePrompting()
+        defer { chime?.cancel() }
         switch mode {
         case .custom(let handler, _): decision = await handler(request)
         case .ask: decision = await DebugApprovalPrompt.ask(request)
@@ -141,6 +145,8 @@ final class DebugApprovals {
 
     private func offerSilence(appName: String) async {
         let offer = DebugSilenceOffer(appName: appName, duration: silenceDuration)
+        let chime = chimeWhilePrompting()
+        defer { chime?.cancel() }
         let accepted: Bool
         if case .custom(_, let silence?) = mode {
             accepted = await silence(offer)
@@ -150,6 +156,12 @@ final class DebugApprovals {
         guard accepted else { return }
         let (seconds, attoseconds) = silenceDuration.components
         silencedUntil = Date().addingTimeInterval(Double(seconds) + Double(attoseconds) / 1e18)
+    }
+
+    /// Starts the chime for a prompt about to be shown; the caller cancels it
+    /// once the person has answered. Nil when sound is off.
+    private func chimeWhilePrompting() -> Task<Void, Never>? {
+        playsSound ? DebugApprovalChime.start() : nil
     }
 
     private func takeTurn() async {
