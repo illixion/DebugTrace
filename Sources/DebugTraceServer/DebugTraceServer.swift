@@ -567,12 +567,20 @@ public final class DebugTraceServer {
     /// Nil unless the person at the device has allowed what `name` does, when it is one of the
     /// endpoints that need more than debug access: loading code (every patch) or capturing the screen.
     func gateSensitive(_ name: String, arguments: [String: JSONValue] = [:], for request: HTTPRequest) async -> DebugError? {
-        if Self.codePatchingEndpoints.contains(name) {
+        // An endpoint declares what it needs; the built-ins are also named, so a registry that
+        // replaced one with a plain stub is still gated.
+        let declared = surface.endpoint(named: name)?.sensitivity ?? .none
+        if declared == .codePatching || Self.codePatchingEndpoints.contains(name) {
             return await approve(request, purpose: .codePatching, detail: Self.patchDetail(arguments))
         }
-        if Self.screenCaptureEndpoints.contains(name) {
-            return await approve(request, purpose: .screenCapture,
-                                 detail: name == "_screenshot" ? "a screenshot of its windows" : "the text of what is on screen")
+        if declared == .screenCapture || Self.screenCaptureEndpoints.contains(name) {
+            let detail: String
+            switch name {
+            case "_screenshot": detail = "a screenshot of its windows"
+            case "_screen": detail = "the text of what is on screen"
+            default: detail = "what its \"\(name)\" endpoint returns, a picture of what is on screen"
+            }
+            return await approve(request, purpose: .screenCapture, detail: detail)
         }
         return nil
     }

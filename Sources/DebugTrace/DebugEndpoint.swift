@@ -23,6 +23,18 @@ public struct DebugEndpoint: Sendable {
         case arguments([String: JSONValue])
     }
 
+    /// What an endpoint does beyond reading app state, which the server asks the person at
+    /// the device about before each call (see `DebugApprovalRequest.Purpose`). A sensitive
+    /// endpoint is never captured into a trace.
+    public enum Sensitivity: Sendable, Equatable {
+        case none
+        /// Shows what is on screen: a screenshot of a window or of an immersive
+        /// space's frame, or the text of it. Asked per call, or once for 15 minutes.
+        case screenCapture
+        /// Loads code a client sent. Asked for every patch.
+        case codePatching
+    }
+
     public typealias Handler = @MainActor @Sendable (DebugArguments) async throws -> DebugResult
 
     public let name: String
@@ -41,6 +53,9 @@ public struct DebugEndpoint: Sendable {
     /// personal content — versions, counts, modes, health, error states.
     /// Development traces ignore it.
     public let releaseSafe: Bool
+    /// Declare `.screenCapture` on any endpoint that returns the screen (an app's own
+    /// frame grab for an immersive space, say): the server then asks like it does for `_screenshot`.
+    public let sensitivity: Sensitivity
     public let timeout: Duration
     let handler: Handler
 
@@ -53,17 +68,19 @@ public struct DebugEndpoint: Sendable {
         destructive: Bool = false,
         trace: TracePolicy = .automatic,
         releaseSafe: Bool = false,
+        sensitivity: Sensitivity = .none,
         timeout: Duration = .seconds(30),
         handler: @escaping Handler
     ) {
-        self.releaseSafe = releaseSafe
+        self.releaseSafe = sensitivity == .none && releaseSafe
+        self.sensitivity = sensitivity
         self.name = name
         self.kind = kind
         self.description = description
         self.parameters = parameters
         self.version = version
         self.destructive = destructive
-        self.trace = kind == .command ? .never : trace
+        self.trace = kind == .command || sensitivity != .none ? .never : trace
         self.timeout = timeout
         self.handler = handler
     }
@@ -109,11 +126,13 @@ extension DebugEndpoint {
         version: Int = 1,
         trace: TracePolicy = .automatic,
         releaseSafe: Bool = false,
+        sensitivity: Sensitivity = .none,
         timeout: Duration = .seconds(30),
         handler: @escaping @MainActor @Sendable (DebugArguments) async throws -> Output
     ) -> DebugEndpoint {
         DebugEndpoint(name: name, kind: .query, description: description, parameters: parameters,
-                      version: version, trace: trace, releaseSafe: releaseSafe, timeout: timeout) { arguments in
+                      version: version, trace: trace, releaseSafe: releaseSafe, sensitivity: sensitivity,
+                      timeout: timeout) { arguments in
             try DebugResult.json(try await handler(arguments))
         }
     }
@@ -149,12 +168,13 @@ extension DebugEndpoint {
         destructive: Bool = false,
         trace: TracePolicy = .automatic,
         releaseSafe: Bool = false,
+        sensitivity: Sensitivity = .none,
         timeout: Duration = .seconds(30),
         handler: @escaping Handler
     ) -> DebugEndpoint {
         DebugEndpoint(name: name, kind: kind, description: description, parameters: parameters,
                       version: version, destructive: destructive, trace: trace, releaseSafe: releaseSafe,
-                      timeout: timeout, handler: handler)
+                      sensitivity: sensitivity, timeout: timeout, handler: handler)
     }
 
     /// The migration path for route tables written against the old

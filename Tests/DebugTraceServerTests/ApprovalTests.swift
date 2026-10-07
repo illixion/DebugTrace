@@ -222,6 +222,34 @@ import Testing
         #expect(purposes == [.access, .screenCapture])
     }
 
+    @Test func anAppEndpointThatDeclaresScreenCaptureIsGatedLikeTheBuiltIns() async throws {
+        let surface = DebugSurface()
+        var calls = 0
+        surface.register(.raw("screenshot", kind: .query, "the immersive frame", releaseSafe: true,
+                              sensitivity: .screenCapture) { _ in calls += 1; return .binary(Data([1]), contentType: "image/png") })
+        let endpoint = try #require(surface.endpoint(named: "screenshot"))
+        // Never in a trace, never release-safe, whatever the author passed.
+        #expect(endpoint.traceArguments == nil)
+        #expect(endpoint.releaseSafe == false)
+        var asked: [(DebugApprovalRequest.Purpose, String?)] = []
+        let server = DebugTraceServer(surface: surface, configuration: .init(
+            ports: 0...0, binding: .loopback, authentication: .token("t"),
+            approval: .custom { request in
+                asked.append((request.purpose, request.detail))
+                return request.purpose == .access ? .allowOnce : .deny
+            }))
+        let base = URL(string: "http://127.0.0.1:\(try await server.start())")!
+        defer { server.stop() }
+        var request = URLRequest(url: base.appendingPathComponent("screenshot"))
+        request.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+        request.setValue("Agent", forHTTPHeaderField: "X-DebugTrace-Client")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as! HTTPURLResponse).statusCode == 403)
+        #expect(calls == 0)
+        #expect(asked.map(\.0) == [.access, .screenCapture])
+        #expect(asked.last?.1?.contains("\"screenshot\" endpoint") == true)
+    }
+
     @Test func theInjectEndpointNeedsItsOwnAllowance() async throws {
         let surface = DebugSurface()
         surface.register(.command("_inject", "load a patch") { _ in ["ok": true] })

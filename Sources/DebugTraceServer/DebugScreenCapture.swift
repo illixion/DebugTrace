@@ -37,6 +37,7 @@ enum DebugScreenCapture {
                 .string("background", "what to draw behind the window: its glass or clear areas have no colour of their own, so white text on a transparent window would vanish on a white page. auto is dark on visionOS and transparent elsewhere", default: "auto", choices: ["auto", "dark", "light", "transparent"]),
             ],
             trace: .never,
+            sensitivity: .screenCapture,
             timeout: .seconds(20)
         ) { arguments in
             let windows = visibleWindows()
@@ -88,6 +89,7 @@ enum DebugScreenCapture {
             "_screen",
             "The text and layout of what the app shows, as the accessibility tree: per visible window, each element's label, value, hint, traits and frame (in window points), nested as the app nests them. Shows which views exist, what they say and where they sit; a view with no accessibility content (decoration, an image without a label) does not appear. Pair with _screenshot to see it. The person at the device is asked before each call, or once for 15 minutes.",
             trace: .never,
+            sensitivity: .screenCapture,
             timeout: .seconds(20)
         ) { _ in
             var budget = maxElements
