@@ -45,9 +45,11 @@ promising a rebuild:
 
 Two more reasons an `inject` fails that are not the edit's fault, both now said in the reply:
 with no `files` it diffs **every** changed source file, including ones another agent changed in a shared
-package (RAVESDK), and one refused file blocks the rest, so pass `files` with just yours; and a plain
-`xcodebuild` or `build-and-sign` without `--inject` into the same `build/DerivedData` replaces the modules a
-patch compiles against, which shows as "module … was not compiled for private import". Relaunch with `--inject`.
+package (RAVESDK), and one refused file blocks the rest, so pass `files` with just yours; and a build that
+replaced the modules a patch compiles against without the patching flags, which shows as "module … was not compiled for private import".
+`build-and-sign --inject` builds into its own `build/DerivedData-inject` so a plain build or deploy can't do that (it
+used to share `build/DerivedData`); it still happens after an `xcodebuild` pointed at that directory by hand, or for an app
+launched before the split. Relaunch with `--inject`.
 **`#if` is evaluated, not refused.** `debugtrace-inject` turns the module's recorded arguments into a
 build configuration (target triple → `os`/`arch`/`targetEnvironment`, `-D` conditions, `-swift-version`,
 feature flags, and `canImport` against the -I/-F paths, the SDK's frameworks and its module maps) and the
@@ -98,7 +100,7 @@ replaceable functions are `hidden` and loading fails with "symbol not found in f
 separately; an unsigned or ad-hoc dylib is refused ("missing code signature") while one signed
 with the dev cert after install loads, including from the app's `tmp/`; an incremental build prints
 no compile command for an up-to-date module, so `capture` keeps what an earlier build recorded
-(`rm -rf build/DerivedData` if the record is missing).
+(`rm -rf build/DerivedData-inject` if the record is missing).
 
 ## Making SwiftUI redraw after a patch
 

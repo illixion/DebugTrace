@@ -129,7 +129,7 @@ def command_capture(options):
         state["modules"][module] = {"args": args, "cwd": cwd, "files": files}
     if not state["modules"]:
         raise Failure("no Swift compile commands in the build log",
-                      "build with `build-and-sign --inject` once from a clean state: rm -rf build/DerivedData")
+                      "build with `build-and-sign --inject` once from a clean state: rm -rf build/DerivedData-inject")
     if options.app_module in state["modules"]:
         state["appModule"] = options.app_module
     elif "appModule" not in state:
@@ -319,11 +319,11 @@ def compile_patch(state, module, sources, label, work):
         errors = [l for l in result.stderr.splitlines() if "error:" in l or l.lstrip().startswith(("|", "`"))][:40]
         hint = "fix the error in the source file, then inject again"
         if "was not compiled for private import" in result.stderr:
-            # Not the edit's fault: the module the patch compiles against was rebuilt without the patching flags,
-            # typically by a plain xcodebuild (or a build-and-sign without --inject) into the same DerivedData.
+            # Not the edit's fault: the module the patch compiles against was rebuilt without the patching flags
+            # (build-and-sign --inject keeps its own DerivedData-inject, so only a hand-run build can).
             hint = (f"the {module} module in the build products was not built for live patching, so no patch can compile against it "
-                    "(a plain `xcodebuild` or a `build-and-sign` without --inject into build/DerivedData overwrites it): "
-                    "relaunch with `build-and-sign --mcp --inject`, and don't build into that DerivedData path afterwards")
+                    "(something rebuilt it without the patching flags, e.g. an `xcodebuild` pointed at build/DerivedData-inject): "
+                    "relaunch with `build-and-sign --mcp --inject`")
         raise Failure(f"the patch for {module} did not compile", hint,
                       compileErrors=errors or result.stderr.splitlines()[-20:], patchSource=sources)
     return dylib, round((time.monotonic() - started) * 1000)
