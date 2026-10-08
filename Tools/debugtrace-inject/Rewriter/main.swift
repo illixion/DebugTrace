@@ -35,6 +35,8 @@ struct Report: Encodable {
     var hasPatch = false
     /// This patch restates everything earlier patches did to the file (see --built).
     var cumulative = false
+    /// Edits that were accepted but change nothing the app will do, or not what the agent likely meant.
+    var warnings: [String] = []
 
     struct Problem: Encodable {
         let decl: String
@@ -56,7 +58,16 @@ struct Callable {
     /// signature is a different declaration, not an edit.
     let key: String
     let bodyTokens: String
+    /// Attributes and modifiers other than access control (`@MainActor`, `nonisolated`, `final`, `override`):
+    /// a patch replaces a body and cannot change how the function is declared.
+    let decorations: String
     let node: Syntax
+}
+
+func decorations(_ attributes: AttributeListSyntax, _ modifiers: DeclModifierListSyntax) -> String {
+    let access: Set<String> = ["private", "fileprivate", "internal", "public", "open", "package"]
+    let kept = modifiers.filter { !access.contains($0.name.text) }
+    return tokens(attributes) + " | " + kept.map { $0.name.text }.joined(separator: " ")
 }
 
 /// Everything in a file that a patch cannot replace, keyed so that a change
@@ -80,6 +91,8 @@ struct Index {
     var parents: [String: String] = [:]
     /// shape id of a stored property -> what a patch can carry in its place, if anything
     var carryable: [String: Carry] = [:]
+    /// path -> stored properties and enum cases in declaration order (their order changes layout, which a patch never does)
+    var memberOrder: [String: [String]] = [:]
     var opaque: [String: String] = [:]
 }
 
@@ -194,7 +207,7 @@ func walk(items: [Syntax], path: String, into index: inout Index) {
             }
             let key = "\(path)|func|\(selector)|\(normalizedSignature(function))"
             index.callables[key] = Callable(kind: .function, path: path, selector: selector, key: key,
-                                            bodyTokens: tokens(body), node: item)
+                                            bodyTokens: tokens(body), decorations: decorations(function.attributes, function.modifiers), node: item)
             index.order.append(key)
             continue
         }
@@ -207,11 +220,12 @@ func walk(items: [Syntax], path: String, into index: inout Index) {
                 if let block = binding.accessorBlock, isComputed(block), binding.typeAnnotation != nil, variable.bindings.count == 1 {
                     let key = "\(path)|var|\(name)|\(isStatic(variable.modifiers) ? "static" : "")|\(tokens(binding.typeAnnotation!))"
                     index.callables[key] = Callable(kind: .computedProperty, path: path, selector: name, key: key,
-                                                    bodyTokens: tokens(block), node: item)
+                                                    bodyTokens: tokens(block), decorations: decorations(variable.attributes, variable.modifiers), node: item)
                     index.order.append(key)
                 } else {
                     // Stored (with or without observers): its layout and initial value are fixed at build time.
                     index.shapes[qualified("var \(name)")] = tokens(variable)
+                    index.memberOrder[path, default: []].append(name)
                     if let carried = carry(variable, path: path) { index.carryable[qualified("var \(name)")] = carried }
                 }
             }
@@ -239,6 +253,14 @@ func walk(items: [Syntax], path: String, into index: inout Index) {
             continue
         }
         if item.is(ImportDeclSyntax.self) { continue }
+        if let cases = item.as(EnumCaseDeclSyntax.self) {
+            // Keyed by name, so reordering cases is not a change a patch has to refuse (it is a warning).
+            for element in cases.elements {
+                index.shapes[qualified("case \(element.name.text)")] = tokens(cases.attributes) + " " + tokens(element.name) + " " + (element.parameterClause.map(tokens) ?? "") + " " + (element.rawValue.map(tokens) ?? "")
+                index.memberOrder[path, default: []].append("case " + element.name.text)
+            }
+            continue
+        }
         // Anything else (typealias, protocol, global, macro): fixed at build time.
         let label = "\(item.kind) \(tokens(item).prefix(60))"
         index.shapes[qualified(label)] = tokens(item)
@@ -342,6 +364,10 @@ func reason(forChanged id: String, isNew: Bool) -> String {
     if id.contains("init(") || id.contains(".init") {
         return "an initializer is fixed at build time: leave it, and set what the new code needs in a patched method or a new type"
     }
+    if id.contains("case ") {
+        return "an enum's cases are fixed at build time, since adding, removing or changing one changes how the enum is laid out and "
+            + "switched over: rebuild, or leave the enum and put the new case's behaviour in a new type"
+    }
     if isNew && (id.contains("var ") || id.contains("Decl")) {
         return "a new stored property can't be added to a type the app already has: use a `static let`, a `let name: Type = value` "
             + "constant, a computed property, or keep the state in a new type: e.g. a new `@Observable` class held by a "
@@ -367,6 +393,14 @@ for (id, text) in new.opaque where old.opaque[id] != text && !belongsToNewType(i
 for id in old.shapes.keys where new.shapes[id] == nil && !id.hasSuffix(" header") {
     report.unpatchable.append(.init(decl: id, reason: "a stored property or declaration was removed"))
 }
+
+// A reordered type is accepted (a patch compiles against the app's own layout and changes none), but it does nothing.
+for (path, order) in new.memberOrder where old.memberOrder[path] != nil && old.memberOrder[path] != order
+    && Set(old.memberOrder[path]!) == Set(order) {
+    report.warnings.append("\(path.isEmpty ? "the file" : path): its stored properties or enum cases were reordered; the running app keeps its "
+        + "old order (a patch cannot change layout, tags or `allCases` order)")
+}
+let oldSelectors = Dictionary(grouping: old.callables.values, by: \.path).mapValues { Set($0.map(\.selector)) }
 
 var body = ""
 var number = 0
@@ -404,6 +438,12 @@ for key in new.order {
         continue
     }
     if let before = old.callables[key] {
+        if before.decorations != callable.decorations {
+            report.warnings.append("\(callable.path.isEmpty ? "" : callable.path + ".")\(callable.selector): its attributes or modifiers changed "
+                + "(\(before.decorations.trimmingCharacters(in: .whitespaces)) -> \(callable.decorations.trimmingCharacters(in: .whitespaces))); "
+                + "a patch replaces the body only and keeps how the function is declared (isolation, final, override)"
+                + (before.bodyTokens == callable.bodyTokens ? ", so this change does nothing" : ""))
+        }
         if before.bodyTokens == callable.bodyTokens {
             report.unchanged += 1
             continue
@@ -424,6 +464,11 @@ for key in new.order {
         body += wrapped(callable.node.description, in: callable.path) + "\n\n"
         report.added.append(label)
         addedPaths.insert(callable.path)
+        if oldSelectors[callable.path]?.contains(callable.selector) == true {
+            report.warnings.append("\(label): the signature (or generics, `static`, `mutating`) changed, so this is added as a new function and "
+                + "every caller in the app, which a patch does not touch, still calls the old one. Patch the callers to call the new one, "
+                + "or keep the signature and change only the body")
+        }
     }
 }
 for key in old.order where new.callables[key] == nil {

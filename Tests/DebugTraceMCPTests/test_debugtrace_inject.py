@@ -216,6 +216,14 @@ class InjectToolTests(unittest.TestCase):
         self.assertNotIn("_inject", [name for name, _ in self.app_calls])
         self.assertEqual([c[0] for c in self.helper_calls][-1], "commit")
 
+    def test_warnings_reach_the_reply_even_when_nothing_was_patched(self):
+        plan = {"ok": True, "dylibs": [], "commit": ["/proj/A.swift"],
+                "files": {"A.swift": {"hasPatch": False, "warnings": ["E: its cases were reordered"]}}}
+        self.wire([{"label": "x"}], plan)
+        _, body = self.call({})
+        self.assertTrue(body["nothingToPatch"])
+        self.assertEqual(body["warnings"], ["A.swift: E: its cases were reordered"])
+
     def test_a_refused_load_commits_nothing_and_says_what_was_applied(self):
         path = os.path.join(tempfile.mkdtemp(), "p.dylib")
         with open(path, "wb") as handle:
@@ -400,6 +408,26 @@ class RewriterTests(unittest.TestCase):
         report, _ = self.run_rewriter(OLD.replace("final class Engine", "final class Engine: Sendable"))
         [problem] = [p for p in report["unpatchable"] if "Engine header" in p["decl"]]
         self.assertIn("new type", problem["reason"])
+
+    def test_accepted_edits_that_change_nothing_are_warned_about(self):
+        report, _ = self.run_rewriter("enum E { case x\n case y\n func f() -> Int { 1 } }".replace("enum E", "enum E"),
+                                      old="enum E { case y\n case x\n func f() -> Int { 1 } }")
+        self.assertEqual(report["unpatchable"], [])
+        self.assertTrue([w for w in report["warnings"] if "reordered" in w])
+        report, _ = self.run_rewriter("struct S { @MainActor func f() -> Int { 1 } }", old="struct S { func f() -> Int { 1 } }")
+        self.assertTrue([w for w in report["warnings"] if "does nothing" in w])
+        self.assertFalse(report["hasPatch"])
+        report, patch = self.run_rewriter("struct S { func f() async -> Int { 1 } }", old="struct S { func f() -> Int { 1 } }")
+        self.assertEqual(report["added"], ["S.f()"])
+        self.assertTrue([w for w in report["warnings"] if "still calls the old one" in w])
+
+    def test_a_plain_body_edit_has_no_warnings(self):
+        report, _ = self.run_rewriter(OLD.replace('"hello v1"', '"hello v2"'))
+        self.assertEqual(report["warnings"], [])
+
+    def test_a_new_or_removed_enum_case_is_refused_with_advice(self):
+        report, _ = self.run_rewriter("enum E { case x\n case y\n case z }", old="enum E { case x\n case y }")
+        self.assertIn("cases are fixed", report["unpatchable"][0]["reason"])
 
     def test_an_added_member_does_not_renumber_the_initializers(self):
         report, _ = self.run_rewriter(OLD.replace("var base = 1", "var base = 1\n    var extra = 3"))

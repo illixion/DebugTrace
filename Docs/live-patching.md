@@ -162,6 +162,25 @@ a parent's opt-in does not reach a child. A row that SwiftUI creates later (a la
 view) evaluates the patched code when it appears, with or without any of this: test with the view on
 screen when the patch loads. **Not yet verified:** `.reopensWindowOnPatch`.
 
+## Accepted, but not what the source says (`warnings`)
+
+A patch replaces bodies and adds declarations; it cannot change how something is declared or laid out.
+Edits like these are accepted, so `inject` replies `ok` with a `warnings` list (also when nothing was patched):
+
+| Edit | What happens |
+|---|---|
+| a function's signature, generics, `static` or `mutating` changed | added as a new function; every caller in the app still calls the old one: patch the callers, or keep the signature |
+| `@MainActor`, `nonisolated`, `final`, `override` or another attribute changed | the body is replaced, the declaration is not: an edit that changes only that does nothing |
+| stored properties or enum cases reordered | the app keeps its order (layout, tags, `allCases`); a patch compiles against the app's own types, so nothing crashes |
+
+Adding, removing or changing an enum case is refused (`case x` in `because`), not warned. A warning that
+the edit is the one you made means it did **not** take effect; rebuild, or restructure as the entry says.
+
+**Where these rules live.** This page is the reference. `~/Projects/CLAUDE.md` summarises it for every session
+under `~/Projects`, the `apps` MCP `instructions` and the `inject` tool description (`Tools/debugtrace-mcp`) say it
+at the point of use, and the refusal and warning texts (`Tools/debugtrace-inject`) say it per edit. When behavior
+changes, change the page and those summaries together.
+
 ## When an edit patches nothing
 
 `inject` replies `nothingToPatch: true` when no function or computed-property body changed in code this build
