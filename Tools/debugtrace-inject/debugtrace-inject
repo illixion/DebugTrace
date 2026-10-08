@@ -317,7 +317,14 @@ def compile_patch(state, module, sources, label, work):
     result = subprocess.run(command, capture_output=True, text=True, cwd=record.get("cwd") or None)
     if result.returncode != 0:
         errors = [l for l in result.stderr.splitlines() if "error:" in l or l.lstrip().startswith(("|", "`"))][:40]
-        raise Failure(f"the patch for {module} did not compile", "fix the error in the source file, then inject again",
+        hint = "fix the error in the source file, then inject again"
+        if "was not compiled for private import" in result.stderr:
+            # Not the edit's fault: the module the patch compiles against was rebuilt without the patching flags,
+            # typically by a plain xcodebuild (or a build-and-sign without --inject) into the same DerivedData.
+            hint = (f"the {module} module in the build products was not built for live patching, so no patch can compile against it "
+                    "(a plain `xcodebuild` or a `build-and-sign` without --inject into build/DerivedData overwrites it): "
+                    "relaunch with `build-and-sign --mcp --inject`, and don't build into that DerivedData path afterwards")
+        raise Failure(f"the patch for {module} did not compile", hint,
                       compileErrors=errors or result.stderr.splitlines()[-20:], patchSource=sources)
     return dylib, round((time.monotonic() - started) * 1000)
 
@@ -361,6 +368,25 @@ def replaceable(module_record, name=None, state=None):
     if state is not None and state.get("scope") == "app" and name != state.get("appModule"):
         return False
     return any(a == "-enable-implicit-dynamic" for a in module_record["args"])
+
+
+def refusal_hint(problems, named):
+    """What to tell an agent whose edit a patch can't carry. A bare "rebuild" made agents give up on live
+    patching for any edit that touched a type, when most of those have a patchable shape."""
+    hint = ("each entry in `because` says what to do instead. A patch replaces function and computed-property bodies and "
+            "adds methods, nested and top-level types, `static let`s and typed `let` constants; it cannot change a type's "
+            "header (inheritance, generics), add an instance stored property or change an initializer. To change what a "
+            "type is, leave it as it was, write the new one as a new type and patch the code that uses it. "
+            "Rebuild with `build-and-sign --mcp --inject` only if that is not possible")
+    files = sorted({p["file"] for p in problems})
+    if not named and len(files) > 1:
+        hint += (f". Not every refusal need be yours: this call diffed every changed source file ({', '.join(files)}), and a file "
+                 "someone else changed (another agent, a pull or a commit in a shared package) blocks the rest. Pass `files` with "
+                 "just the ones you edited to patch those alone")
+    elif not named:
+        hint += (f". This call diffed every changed source file; if {files[0]} is not one you edited, someone else changed it, "
+                 "and `files` with just yours patches without it")
+    return hint
 
 
 def command_patch(options):
@@ -425,11 +451,8 @@ def command_patch(options):
         if report["hasPatch"]:
             per_module.setdefault(module, []).append(patch_file)
     if problems:
-        raise Failure(
-            "this change cannot be applied to the running app",
-            "rebuild and relaunch with `build-and-sign --mcp --inject`: a patch replaces function bodies and "
-            "adds methods, but cannot change stored properties, initializers, type headers or protocol requirements",
-            rebuildNeeded=True, because=problems, files=reports)
+        raise Failure("this change cannot be applied to the running app", refusal_hint(problems, bool(options.file)),
+                      rebuildNeeded=True, because=problems, files=reports)
 
     dylibs, timings = [], {"rewriteMs": round((time.monotonic() - started) * 1000), "compileMs": 0}
     for number, (module, sources) in enumerate(sorted(per_module.items())):

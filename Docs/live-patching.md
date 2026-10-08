@@ -28,10 +28,27 @@ through `_inject`. Later patches override earlier ones; a function changed back 
 with its original body, because the diff is against the last-injected state (`build/inject/live/`),
 not the build. A relaunch (`_patches` empty) resets that state to the build.
 
-**What a patch cannot do**, and the reply says "rebuild" and applies **nothing** (never half):
-stored properties (added, removed, or a changed initial value), initializers, type headers
-(inheritance, generics), protocol requirements, new top-level declarations the rest of the app must
-see. Check this before promising an edit can go live. **`#if` is evaluated, not refused.** `debugtrace-inject` turns the module's recorded arguments into a
+**What a patch cannot do**, and the reply says what to do instead and applies **nothing** (never half):
+a type's header (inheritance, generics), an added or removed instance stored property or a changed initial
+value, initializers, protocol requirements, new top-level declarations other than types (a global function or
+`let` the rest of the app must see). **Most edits that touch a type still go live**, so check before
+promising a rebuild:
+
+- a **new type**, top-level or nested in an existing type, comes along whole;
+- a new `static let`/`static var` with a value is carried (extensions may hold statics);
+- a new `let name: Type = value` becomes a computed property in the patch (re-evaluated per read, so keep
+  the value pure; only patched code can see it; a `var`, or a `let` without a type, is refused);
+- **to change what a type is** (`struct Foo: UIViewRepresentable` → `struct Foo: View`, new generics): leave
+  `Foo`, write the new shape as a new type and patch the body of whatever creates it to use that one. The old
+  type stays in the app, unused. Found when a Longwave agent rewrote a view's conformance and gave up on
+  live patching (2026-10-08).
+
+Two more reasons an `inject` fails that are not the edit's fault, both now said in the reply:
+with no `files` it diffs **every** changed source file, including ones another agent changed in a shared
+package (RAVESDK), and one refused file blocks the rest, so pass `files` with just yours; and a plain
+`xcodebuild` or `build-and-sign` without `--inject` into the same `build/DerivedData` replaces the modules a
+patch compiles against, which shows as "module … was not compiled for private import". Relaunch with `--inject`.
+**`#if` is evaluated, not refused.** `debugtrace-inject` turns the module's recorded arguments into a
 build configuration (target triple → `os`/`arch`/`targetEnvironment`, `-D` conditions, `-swift-version`,
 feature flags, and `canImport` against the -I/-F paths, the SDK's frameworks and its module maps) and the
 rewriter keeps only each `#if`'s active branch (`SwiftIfConfig.removingInactive`) before diffing, so a

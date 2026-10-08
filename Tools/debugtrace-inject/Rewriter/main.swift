@@ -76,7 +76,39 @@ struct Index {
     var shapes: [String: String] = [:]
     /// top-level and member declarations that are new in a patch as they stand
     var types: [String: Syntax] = [:]
+    /// type id -> the path it is declared under ("" at top level)
+    var parents: [String: String] = [:]
+    /// shape id of a stored property -> what a patch can carry in its place, if anything
+    var carryable: [String: Carry] = [:]
     var opaque: [String: String] = [:]
+}
+
+/// A new stored property that a patch can still provide to the code it replaces.
+struct Carry {
+    let path: String
+    let label: String
+    /// The declaration as the patch's extension should hold it.
+    let text: String
+}
+
+/// A stored property a patch can supply although the type's layout is fixed: a `static`
+/// (extensions may hold those) or a `let` with a type and a value, which patched code
+/// can read as a computed property that returns the value. Only patched code sees it.
+func carry(_ variable: VariableDeclSyntax, path: String) -> Carry? {
+    guard variable.bindings.count == 1, let binding = variable.bindings.first,
+          let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+          let value = binding.initializer?.value, binding.accessorBlock == nil,
+          variable.attributes.isEmpty else { return nil }
+    let label = (path.isEmpty ? "" : path + ".") + name
+    if variable.modifiers.contains(where: { $0.name.text == "static" }) {
+        return Carry(path: path, label: label, text: variable.description)
+    }
+    guard variable.bindingSpecifier.text == "let", let type = binding.typeAnnotation,
+          !variable.modifiers.contains(where: { ["lazy", "class", "weak", "unowned"].contains($0.name.text) })
+    else { return nil }
+    return Carry(path: path, label: label + " (as a computed property)",
+                 text: "var \(name)\(type.description.trimmingCharacters(in: .whitespacesAndNewlines)) "
+                    + "{ \(value.description.trimmingCharacters(in: .whitespacesAndNewlines)) }")
 }
 
 func selector(for function: FunctionDeclSyntax) -> String? {
@@ -180,6 +212,7 @@ func walk(items: [Syntax], path: String, into index: inout Index) {
                 } else {
                     // Stored (with or without observers): its layout and initial value are fixed at build time.
                     index.shapes[qualified("var \(name)")] = tokens(variable)
+                    if let carried = carry(variable, path: path) { index.carryable[qualified("var \(name)")] = carried }
                 }
             }
             continue
@@ -199,6 +232,7 @@ func walk(items: [Syntax], path: String, into index: inout Index) {
             let id = qualified(count == 0 ? name : "\(name)#\(count)")
             index.shapes[id + " header"] = header(of: item)
             index.types[id] = item
+            index.parents[id] = path
             // Each extension of a type is walked under the same path text, so a
             // method that moves between two extensions of one type is a new declaration.
             walk(items: inner, path: qualified(name), into: &index)
@@ -289,16 +323,41 @@ let new = index(newSource)
 
 /// A top-level type that is new in this file comes along whole, members and all,
 /// so nothing inside it is a change to existing code.
-let newTypes = Set(new.types.keys.filter { old.types[$0] == nil && !$0.contains(".") && !$0.contains("#") })
+/// One nested in a type the app already has comes along too, as an extension member.
+let newTypes = Set(new.types.keys.filter { id in
+    guard old.types[id] == nil, !id.contains("#") else { return false }
+    let parent = new.parents[id] ?? ""
+    return parent.isEmpty ? !id.contains(".") : old.types[parent] != nil
+})
 func belongsToNewType(_ id: String) -> Bool {
     newTypes.contains { id == $0 || id.hasPrefix($0 + ".") || id.hasPrefix($0 + " ") }
 }
 
+/// Says what can't be done and what to do instead, because "rebuild" alone sends an agent off to rebuild.
+func reason(forChanged id: String, isNew: Bool) -> String {
+    if id.hasSuffix(" header") {
+        return "a type's inheritance, generics or attributes changed, and a patch cannot change what a type is: leave this type as it was, "
+            + "put the new version in a new type (a new type comes along) and patch the code that uses it to use that"
+    }
+    if id.contains("init(") || id.contains(".init") {
+        return "an initializer is fixed at build time: leave it, and set what the new code needs in a patched method or a new type"
+    }
+    if isNew && (id.contains("var ") || id.contains("Decl")) {
+        return "a new stored property can't be added to a type the app already has: use a `static let`, a `let name: Type = value` "
+            + "constant, a computed property, or keep the state in a new type"
+    }
+    return isNew ? "a new declaration the existing code can't see: put it inside a patched method, or in a new type"
+                 : "a stored property's value or another declaration changed, which is fixed at build time"
+}
+
 // What a patch can't carry: any non-callable thing that differs.
+var carried: [Carry] = []
 for (id, text) in new.shapes where old.shapes[id] != text && !belongsToNewType(id) {
-    report.unpatchable.append(.init(decl: id, reason: old.shapes[id] == nil
-        ? "a new stored property, initializer, or declaration that existing code can't see"
-        : "a stored property, initializer, type header or other declaration changed"))
+    if old.shapes[id] == nil, let carry = new.carryable[id] {
+        carried.append(carry)
+        continue
+    }
+    report.unpatchable.append(.init(decl: id, reason: reason(forChanged: id, isNew: old.shapes[id] == nil)))
 }
 for (id, text) in new.opaque where old.opaque[id] != text && !belongsToNewType(id) {
     report.unpatchable.append(.init(decl: id, reason: ifConfigProblem.map { "inside an #if whose condition couldn't be evaluated for this build (\($0))" }
@@ -369,10 +428,15 @@ for key in new.order {
 for key in old.order where new.callables[key] == nil {
     report.removed.append((old.callables[key]!.path.isEmpty ? "" : old.callables[key]!.path + ".") + old.callables[key]!.selector)
 }
-// A type that is new in the file, at top level, comes along whole.
-for (id, node) in new.types where old.types[id] == nil && !id.contains(".") {
-    body += node.description + "\n\n"
+// A type that is new in the file comes along whole: at top level as it is, nested as a member of its parent.
+for id in newTypes.sorted() {
+    guard let node = new.types[id] else { continue }
+    body += wrapped(node.description, in: new.parents[id] ?? "") + "\n\n"
     report.added.append(id)
+}
+for item in carried.sorted(by: { $0.label < $1.label }) {
+    body += wrapped(item.text, in: item.path) + "\n\n"
+    report.added.append(item.label)
 }
 
 let importLines = parsed(newSource).statements.compactMap { $0.item.as(ImportDeclSyntax.self) }

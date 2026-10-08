@@ -262,6 +262,20 @@ func greeting() -> String { "hello v1" }
 """
 
 
+class RefusalHintTests(unittest.TestCase):
+    def test_an_unnamed_call_blames_other_files_and_points_at_files(self):
+        problems = [{"file": "RAVESubtitles.swift", "decl": "X", "reason": "r"}, {"file": "MouseHitTarget.swift", "decl": "Y", "reason": "r"}]
+        hint = inject.refusal_hint(problems, named=False)
+        self.assertIn("Pass `files`", hint)
+        self.assertIn("RAVESubtitles.swift", hint)
+        self.assertIn("new type", hint)
+
+    def test_a_named_call_does_not_blame_anyone(self):
+        hint = inject.refusal_hint([{"file": "A.swift", "decl": "X", "reason": "r"}], named=True)
+        self.assertNotIn("someone else", hint)
+        self.assertIn("new type", hint)
+
+
 @unittest.skipUnless(shutil.which("xcrun"), "needs Xcode's toolchain")
 class RewriterTests(unittest.TestCase):
     """The SwiftSyntax tool: what it replaces, what it copies, what it refuses."""
@@ -358,6 +372,34 @@ class RewriterTests(unittest.TestCase):
         # Once, as the type itself: not again as methods added to an extension of it.
         self.assertEqual(patch.count("static func play()"), 1)
         self.assertNotIn("extension Beep", patch)
+
+    def test_a_new_type_nested_in_an_existing_one_comes_along_as_a_member(self):
+        nested = "func value() -> Int { base }\n    private struct Ring {\n        var width: Int { 4 }\n        var gap = 2\n    }"
+        report, patch = self.run_rewriter(OLD.replace("func value() -> Int { base }", nested))
+        self.assertEqual(report["unpatchable"], [])
+        self.assertEqual(report["added"], ["Thing.Ring"])
+        self.assertIn("extension Thing {", patch)
+        self.assertEqual(patch.count("struct Ring"), 1)
+
+    def test_a_new_static_or_typed_let_is_carried_and_a_new_var_is_not(self):
+        report, patch = self.run_rewriter(OLD.replace(
+            "var base = 1", "var base = 1\n    static let edge = 48.0\n    let inset: Double = edge * 2\n    private let tint: Int = 7"))
+        self.assertEqual(report["unpatchable"], [])
+        self.assertEqual(sorted(report["added"]), ["Thing.edge", "Thing.inset (as a computed property)",
+                                                    "Thing.tint (as a computed property)"])
+        self.assertIn("static let edge = 48.0", patch)
+        self.assertIn("var inset: Double { edge * 2 }", patch)
+        self.assertIn("var tint: Int { 7 }", patch)
+        # A let without a type can't become a computed property, and a var can't be a constant.
+        for line in ("let plain = 3", "var count: Int = 3"):
+            report, _ = self.run_rewriter(OLD.replace("var base = 1", "var base = 1\n    " + line))
+            self.assertEqual(len(report["unpatchable"]), 1, line)
+            self.assertIn("new stored property", report["unpatchable"][0]["reason"])
+
+    def test_a_changed_type_header_says_to_use_a_new_type_instead(self):
+        report, _ = self.run_rewriter(OLD.replace("final class Engine", "final class Engine: Sendable"))
+        [problem] = [p for p in report["unpatchable"] if "Engine header" in p["decl"]]
+        self.assertIn("new type", problem["reason"])
 
     def test_an_added_member_does_not_renumber_the_initializers(self):
         report, _ = self.run_rewriter(OLD.replace("var base = 1", "var base = 1\n    var extra = 3"))
