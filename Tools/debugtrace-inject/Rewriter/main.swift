@@ -344,7 +344,8 @@ func reason(forChanged id: String, isNew: Bool) -> String {
     }
     if isNew && (id.contains("var ") || id.contains("Decl")) {
         return "a new stored property can't be added to a type the app already has: use a `static let`, a `let name: Type = value` "
-            + "constant, a computed property, or keep the state in a new type"
+            + "constant, a computed property, or keep the state in a new type: e.g. a new `@Observable` class held by a "
+            + "`static let` on the type, which the patched `body` or method reads (a new type comes along)"
     }
     return isNew ? "a new declaration the existing code can't see: put it inside a patched method, or in a new type"
                  : "a stored property's value or another declaration changed, which is fixed at build time"

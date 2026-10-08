@@ -38,6 +38,10 @@ promising a rebuild:
 - a new `static let`/`static var` with a value is carried (extensions may hold statics);
 - a new `let name: Type = value` becomes a computed property in the patch (re-evaluated per read, so keep
   the value pure; only patched code can see it; a `var`, or a `let` without a type, is refused);
+- **new per-instance state** (a `@State`, a `var`) on a type the app has: an instance's layout is fixed, so
+  put the state in a new `@Observable` (or `ObservableObject`) class, hold it in a `static let` on the type (one
+  shared instance is fine while iterating), and read it from the patched `body` or method. Only the shared,
+  not per-instance, state is possible this way; a per-instance need that must survive relaunch is a rebuild;
 - **to change what a type is** (`struct Foo: UIViewRepresentable` → `struct Foo: View`, new generics): leave
   `Foo`, write the new shape as a new type and patch the body of whatever creates it to use that one. The old
   type stays in the app, unused. Found when a Longwave agent rewrote a view's conformance and gave up on
