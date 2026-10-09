@@ -48,7 +48,9 @@ Turn it off with `collectsDiagnostics: false`.
   `name +offset`. It reads the appstore's `data/traces/<id>/files/crashes/` and the dSYM archive.
   `build-and-sign` keeps the dSYMs of what each device is running, in
   `~/.local/state/debugtrace/dsyms/<bundleId>@<device>/` (`uuids.json` maps binary UUIDs to files):
-  one slot per app and device, replaced by the next successful install to that device, so a
+  one slot per app and device, replaced by the next successful install to that device (the one
+  it replaces stays once, as `<slot>.previous`: a crash is reported on the next launch, which may
+  be of the updated build), so a
   device left on an old build can still be symbolicated after other devices and the build folder
   moved on. The slot is an APFS clone (no copy time; it costs disk only once the build folder's
   copy is overwritten, about 10 MB for xrTimer, 50–200 MB for the big apps). `--distribution`
@@ -57,6 +59,10 @@ Turn it off with `collectsDiagnostics: false`.
   (an executable's text segment starts at 0x100000000).
   Checked on xrTimer 2026-10-09: with the build folder's dSYM already replaced by a newer build,
   the archived one resolved the crash to its closure and line.
+- **The `.ips` itself** (full crash log, Apple's frames symbolicated; the only report on tvOS) is
+  pulled from each device by the appstore's poller (`devicectl … --domain-type systemCrashLogs`,
+  also while the device is locked) and shown beside the traces. `debugtrace-symbolicate` reads an
+  `.ips` too. The appstore links it to the trace of the same crash by app, pid and time.
 - No wire-format change: the store verifies any listed file, and `crashes/` is just more files.
 - **Testing:** a simulator never delivers MetricKit diagnostics (checked on the visionOS 27
   simulator: the app crashed, nothing arrived in 90 s). Use a device. To exercise the pre-27

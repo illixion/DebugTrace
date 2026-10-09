@@ -109,6 +109,27 @@ class SymbolicateTests(unittest.TestCase):
         self.assertEqual(len(sym.report_files(os.path.join(self.tmp.name, "trace"))), 1)
         self.assertEqual(sym.report_files(os.path.join(self.tmp.name, "nothing")), [])
 
+    def test_ips_resolves_app_frames_and_keeps_the_devices_own_symbols(self):
+        self.slot("a", APP, "abc1234")
+        ips = os.path.join(self.tmp.name, "c.ips")
+        header = {"app_name": "App", "app_version": "1.0", "build_version": "abc1234", "os_version": "xrOS 27.2"}
+        body = {"pid": 7, "captureTime": "t", "faultingThread": 1,
+                "exception": {"type": "EXC_BREAKPOINT", "signal": "SIGTRAP"}, "termination": {"indicator": "Trace/BPT trap: 5"},
+                "usedImages": [{"uuid": SYSTEM.lower(), "name": "libsystem"}, {"uuid": APP.lower(), "name": "App"}],
+                "threads": [{"frames": [{"imageIndex": 0, "imageOffset": 1, "symbol": "idle"}]},
+                            {"triggered": True, "frames": [{"imageIndex": 1, "imageOffset": 0x100},
+                                                           {"imageIndex": 0, "imageOffset": 0x20, "symbol": "start", "symbolLocation": 8}]}]}
+        open(ips, "w").write(json.dumps(header) + "\n" + json.dumps(body))
+        out = io.StringIO()
+        sym.render_ips(ips, False, sym.archive(self.dsyms), out)
+        text = out.getvalue()
+        self.assertIn("fn_0x100000100", text)       # the app frame, from the archive
+        self.assertIn("start + 8", text)             # the device's own symbol kept
+        self.assertIn("EXC_BREAKPOINT, SIGTRAP", text)
+        self.assertNotIn("idle", text)               # the other thread, not blamed
+        sym.render_ips(ips, True, {}, out)
+        self.assertIn("no dSYM kept for this build's binary", out.getvalue())
+
     def test_a_hang_follows_the_heaviest_branch(self):
         root = frame(APP, 1, subs=[dict(frame(APP, 2), sampleCount=1), dict(frame(APP, 3), sampleCount=9)])
         self.assertEqual([f["offsetIntoBinaryTextSegment"] for f in sym.heaviest(root)], [1, 3])

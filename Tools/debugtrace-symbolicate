@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Symbolicate the MetricKit reports in a debug trace against the dSYMs build-and-sign kept.
 
-    debugtrace-symbolicate <trace id | trace folder | crashes/<id>.json> [--all] [--dsyms DIR]
+    debugtrace-symbolicate <trace id | trace folder | crashes/<id>.json | crash.ips> [--all] [--dsyms DIR]
 
 A trace id is looked up in the appstore's data/traces (APPSTORE_DATA overrides). dSYMs
 come from ~/.local/state/debugtrace/dsyms (DEBUGTRACE_DSYM_DIR, or --dsyms): build-and-sign
-keeps one set per app and device, the build that was installed last. Frames of binaries it
-has no dSYM for (Apple's, or an older build) are printed as `name +offset`.
+keeps one set per app and device (the build installed last and the one before it). Frames of
+binaries it has no dSYM for (Apple's, or an older build) are printed as `name +offset`, or with
+the symbol the device already put in an .ips.
 
 By default only the thread the OS blamed is printed; --all prints every thread, following
 the heaviest path through a hang's sample tree. See Docs/traces.md."""
@@ -121,6 +122,58 @@ def symbolicate(frames, known):
                 frame["symbol"] = symbol.strip()
 
 
+def split_ips(text):
+    """(header, body) of an .ips: a JSON header line, then the JSON report."""
+    head, _, rest = text.partition("\n")
+    return json.loads(head), json.loads(rest)
+
+
+def ips_threads(body):
+    """[(blamed, [frame, ...])]. A frame is {uuid, name, offset, embedded}, `embedded` being the
+    symbol the device already resolved (Apple's frames, mostly)."""
+    images = body.get("usedImages", [])
+    out = []
+    for index, thread in enumerate(body.get("threads", [])):
+        frames = []
+        for f in thread.get("frames", []):
+            image = images[f["imageIndex"]] if 0 <= f.get("imageIndex", -1) < len(images) else {}
+            embedded = f.get("symbol")
+            if embedded and f.get("sourceFile"):
+                embedded += f" ({f['sourceFile']}:{f.get('sourceLine', '?')})"
+            elif embedded and "symbolLocation" in f:
+                embedded += f" + {f['symbolLocation']}"
+            frames.append({"uuid": (image.get("uuid") or "").upper(), "name": image.get("name", "?"),
+                           "offset": f.get("imageOffset", 0), "embedded": embedded})
+        blamed = thread.get("triggered", False) or index == body.get("faultingThread", -1)
+        out.append((blamed, frames))
+    return out
+
+
+def render_ips(path, show_all, known, out=sys.stdout):
+    header, body = split_ips(open(path).read())
+    exception = body.get("exception") or {}
+    termination = body.get("termination") or {}
+    facts = ", ".join(x for x in (exception.get("type"), exception.get("signal"), termination.get("indicator")) if x)
+    print(f"== {os.path.basename(path)}  {header.get('app_name', '?')} {header.get('app_version', '')}"
+          f" ({header.get('build_version', '?')})  {header.get('os_version', '')}", file=out)
+    print(f"-- {facts or 'no exception info'}  pid {body.get('pid', '?')}  captured {body.get('captureTime', '?')}", file=out)
+    asi = body.get("asi")
+    if asi:
+        print(f"   asi: {json.dumps(asi)[:400]}", file=out)
+    all_threads = ips_threads(body)
+    for _, frames in all_threads:
+        symbolicate(frames, known)
+    shown = [(b, f) for b, f in all_threads if b or show_all] or all_threads[:1]
+    for number, (blamed, frames) in enumerate(shown):
+        print(f"   thread {number}{' (blamed)' if blamed else ''}", file=out)
+        for n, frame in enumerate(frames):
+            where = frame.get("symbol") or frame.get("embedded") or f"{frame['name']} +{hex(frame['offset'])}"
+            print(f"     #{n:<2} {frame['name']:<28} {where}", file=out)
+    own = {f["uuid"] for _, fs in all_threads for f in fs if f["uuid"] in known}
+    if not own:
+        print("   no dSYM kept for this build's binary: app frames are unresolved", file=out)
+
+
 def describe(diagnostic):
     meta = diagnostic.get("diagnosticMetaData") or {}
     env = diagnostic.get("environment") or {}
@@ -166,6 +219,9 @@ def main():
     parser.add_argument("--all", action="store_true", help="print every thread, not only the blamed one")
     parser.add_argument("--dsyms", default=DEFAULT_DSYMS, help=f"dSYM archive (default {DEFAULT_DSYMS})")
     args = parser.parse_args()
+    if args.target.endswith(".ips") and os.path.isfile(args.target):
+        render_ips(args.target, args.all, archive(args.dsyms))
+        return
     files = report_files(args.target)
     if not files:
         sys.exit(f"no crashes/*.json for {args.target!r}: not a trace with MetricKit reports? "
