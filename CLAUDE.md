@@ -18,10 +18,11 @@ up in all three. That is the whole design.
 | `DebugTraceServer` | `Sources/DebugTraceServer` | HTTP + MCP listener, approval, `_profile` (`DebugProfiler` over the C walker `DebugTraceSampler`), `_screenshot`/`_screen` (`DebugScreenCapture`), patch-runtime loader |
 | `DebugTraceInject` | `Sources/DebugTraceInject` | `_inject` / `_patches`: loads a signed patch dylib. Embedded by `build-and-sign --inject`, never linked by apps. |
 | `debugtrace-mcp` | `Tools/debugtrace-mcp` | the `apps` MCP server every agent uses (stdio, no dependencies): `apps`, `help`, `call`, `trace`, `inject` |
+| `debugtrace-symbolicate` | `Tools/debugtrace-symbolicate` | resolves a trace's MetricKit crash reports against the dSYMs `build-and-sign` keeps per app and device |
 | `debugtrace-inject` | `Tools/debugtrace-inject` | patch pipeline: the Python driver `debugtrace-inject` and the SwiftSyntax `Rewriter/` |
 
 Tests: `Tests/DebugTraceTests`, `…ServerTests`, `…InjectTests` (Swift) and `Tests/DebugTraceMCPTests`
-(Python, covers both tools). Wire formats other repos depend on: [Docs/traces.md](Docs/traces.md).
+(Python, covers the tools). Wire formats other repos depend on: [Docs/traces.md](Docs/traces.md).
 
 ## Docs map
 

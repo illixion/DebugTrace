@@ -43,10 +43,20 @@ Turn it off with `collectsDiagnostics: false`.
   (`source: MXMetricManager`) it is the `MXDiagnosticPayload`: `{crashDiagnostics: [{callStackTree,
   diagnosticMetaData: {appBuildVersion, signal, …}}], timeStampBegin, timeStampEnd}`.
   Either way it is a call-stack tree of binary UUIDs and offsets, not an `.ips`.
-- **Symbolicating:** match a frame's `binaryUUID` to `dwarfdump --uuid <App>.app.dSYM`, then
-  `atos -arch arm64 -o <dSYM>/Contents/Resources/DWARF/<App> -l 0x100000000 0x100000000+<offsetIntoBinaryTextSegment>`
-  (an executable's text segment starts at 0x100000000). Checked on xrTimer 2026-10-09: an
-  injected out-of-range crash resolved to its closure and line.
+- **Symbolicating:** `Tools/debugtrace-symbolicate <trace id>` prints the blamed thread (`--all`
+  for every thread) with app frames resolved to function and line; Apple's frames stay
+  `name +offset`. It reads the appstore's `data/traces/<id>/files/crashes/` and the dSYM archive.
+  `build-and-sign` keeps the dSYMs of what each device is running, in
+  `~/.local/state/debugtrace/dsyms/<bundleId>@<device>/` (`uuids.json` maps binary UUIDs to files):
+  one slot per app and device, replaced by the next successful install to that device, so a
+  device left on an old build can still be symbolicated after other devices and the build folder
+  moved on. The slot is an APFS clone (no copy time; it costs disk only once the build folder's
+  copy is overwritten, about 10 MB for xrTimer, 50–200 MB for the big apps). `--distribution`
+  builds, `--no-deploy` and `--sign-only` keep nothing. By hand: match a frame's `binaryUUID` to
+  `dwarfdump --uuid`, then `atos -arch arm64 -o <DWARF file> -l 0x100000000 0x100000000+<offsetIntoBinaryTextSegment>`
+  (an executable's text segment starts at 0x100000000).
+  Checked on xrTimer 2026-10-09: with the build folder's dSYM already replaced by a newer build,
+  the archived one resolved the crash to its closure and line.
 - No wire-format change: the store verifies any listed file, and `crashes/` is just more files.
 - **Testing:** a simulator never delivers MetricKit diagnostics (checked on the visionOS 27
   simulator: the app crashed, nothing arrived in 90 s). Use a device. To exercise the pre-27
