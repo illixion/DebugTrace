@@ -40,13 +40,19 @@ Turn it off with `collectsDiagnostics: false`.
   MetricKit's own JSON. On 27+ (`source: MetricManager`) that is `{crashDiagnostic | hangDiagnostic
   | …, environment, timeRange, version}`; the crashed build is `environment.applicationBuildVersion`,
   which can differ from the trace's `app.build` (the build that reported it). Before 27
-  (`source: MXMetricManager`) it is the `MXDiagnosticPayload`, with `diagnosticMetaData` per entry.
+  (`source: MXMetricManager`) it is the `MXDiagnosticPayload`: `{crashDiagnostics: [{callStackTree,
+  diagnosticMetaData: {appBuildVersion, signal, …}}], timeStampBegin, timeStampEnd}`.
   Either way it is a call-stack tree of binary UUIDs and offsets, not an `.ips`.
 - **Symbolicating:** match a frame's `binaryUUID` to `dwarfdump --uuid <App>.app.dSYM`, then
   `atos -arch arm64 -o <dSYM>/Contents/Resources/DWARF/<App> -l 0x100000000 0x100000000+<offsetIntoBinaryTextSegment>`
   (an executable's text segment starts at 0x100000000). Checked on xrTimer 2026-10-09: an
   injected out-of-range crash resolved to its closure and line.
 - No wire-format change: the store verifies any listed file, and `crashes/` is just more files.
+- **Testing:** a simulator never delivers MetricKit diagnostics (checked on the visionOS 27
+  simulator: the app crashed, nothing arrived in 90 s). Use a device. To exercise the pre-27
+  `MXMetricManager` path on a 27 device, launch with `DEBUGTRACE_LEGACY_METRICKIT=1`
+  (`devicectl device process launch --environment-variables '{"DEBUGTRACE_LEGACY_METRICKIT":"1"}'`);
+  verified on the Vision Pro, 2026-10-09. Fault injection: crash once per install, then relaunch.
 - Measured on the Vision Pro with a `build-and-sign --no-mcp` build: the crash was delivered
   and uploaded within seconds of relaunching the app.
 - MetricKit sends no report for every event (hangs need the device to be sampling), and the

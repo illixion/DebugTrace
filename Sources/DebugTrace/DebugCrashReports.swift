@@ -62,7 +62,9 @@ public final class DebugCrashReports: @unchecked Sendable {
         lock.unlock()
         #if canImport(MetricKit) && !os(tvOS)
         guard let identifier = Bundle.main.bundleIdentifier, !identifier.hasPrefix("com.apple.") else { return }
-        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
+        // DEBUGTRACE_LEGACY_METRICKIT=1 forces the pre-27 path, to test it on a 27 device.
+        let forceLegacy = ProcessInfo.processInfo.environment["DEBUGTRACE_LEGACY_METRICKIT"] == "1"
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *), !forceLegacy {
             let manager = MetricManager()
             let task = Task { [weak self] in
                 for await report in manager.diagnosticReports {
