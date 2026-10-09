@@ -37,10 +37,18 @@ Turn it off with `collectsDiagnostics: false`.
 
 - A hand-made trace carries the last week's reports as context too.
 - Files are `crashes/<id>.json`: `{id, receivedAt, source, kinds, report}`, `report` being
-  MetricKit's own JSON. It is a call-stack tree of binary UUIDs and offsets, not an `.ips`, and
-  needs that build's dSYM to symbolicate. The crashed build is `report…metaData.appBuildVersion`
-  and can differ from the trace's `app.build` (the build that reported it).
+  MetricKit's own JSON. On 27+ (`source: MetricManager`) that is `{crashDiagnostic | hangDiagnostic
+  | …, environment, timeRange, version}`; the crashed build is `environment.applicationBuildVersion`,
+  which can differ from the trace's `app.build` (the build that reported it). Before 27
+  (`source: MXMetricManager`) it is the `MXDiagnosticPayload`, with `diagnosticMetaData` per entry.
+  Either way it is a call-stack tree of binary UUIDs and offsets, not an `.ips`.
+- **Symbolicating:** match a frame's `binaryUUID` to `dwarfdump --uuid <App>.app.dSYM`, then
+  `atos -arch arm64 -o <dSYM>/Contents/Resources/DWARF/<App> -l 0x100000000 0x100000000+<offsetIntoBinaryTextSegment>`
+  (an executable's text segment starts at 0x100000000). Checked on xrTimer 2026-10-09: an
+  injected out-of-range crash resolved to its closure and line.
 - No wire-format change: the store verifies any listed file, and `crashes/` is just more files.
+- Measured on the Vision Pro with a `build-and-sign --no-mcp` build: the crash was delivered
+  and uploaded within seconds of relaunching the app.
 - MetricKit sends no report for every event (hangs need the device to be sampling), and the
   lead-up to a crash is only in `breadcrumbs*.jsonl`. The `.ips` itself stays on the device:
   `xcrun devicectl device copy from --device <d> --domain-type systemCrashLogs`.
