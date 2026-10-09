@@ -63,6 +63,9 @@ Turn it off with `collectsDiagnostics: false`.
   pulled from each device by the appstore's poller (`devicectl … --domain-type systemCrashLogs`,
   also while the device is locked) and shown beside the traces. `debugtrace-symbolicate` reads an
   `.ips` too. The appstore links it to the trace of the same crash by app, pid and time.
+- **Agents** reach all of this through the appstore's `bin/crash-reports` (`list`, `show`, `done`):
+  `~/Projects/CLAUDE.md` tells them to look there first and, once a crash is fixed and verified, to
+  move what they investigated to the Trash with `done`, never `rm`.
 - No wire-format change: the store verifies any listed file, and `crashes/` is just more files.
 - **Testing:** a simulator never delivers MetricKit diagnostics (checked on the visionOS 27
   simulator: the app crashed, nothing arrived in 90 s). Use a device. To exercise the pre-27
