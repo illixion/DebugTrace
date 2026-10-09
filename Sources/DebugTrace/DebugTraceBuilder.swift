@@ -65,6 +65,7 @@ public struct DebugTraceArchive: Sendable, Identifiable {
 /// system-log.txt     the process's unified log (development builds only)
 /// breadcrumbs.jsonl  feature marks, this session and earlier ones
 /// breadcrumbs.previous.jsonl
+/// crashes/<id>.json  OS diagnostics about earlier runs (MetricKit): crash, hang, ...
 /// note.txt           the reporter's note
 /// attachments/…      registered attachments and binary query results
 /// ```
@@ -78,7 +79,8 @@ enum DebugTraceBuilder {
         surface: DebugSurface,
         configuration: DebugTraceConfiguration,
         credential: DebugTraceCredential?,
-        logWindowSeconds: Int?
+        logWindowSeconds: Int?,
+        diagnostics: [DebugCrashReport] = []
     ) async throws -> DebugTraceArchive {
         let redactor = configuration.redactor
         let traceId = UUID().uuidString.lowercased()
@@ -107,6 +109,11 @@ enum DebugTraceBuilder {
         }
         if let previous = crumbs.previous {
             files.append(("breadcrumbs.previous.jsonl", Data(redactor.redact(String(decoding: previous, as: UTF8.self)).utf8)))
+        }
+
+        for report in diagnostics {
+            guard let json = try? JSONValue.parse(report.data) else { continue }
+            files.append(("crashes/\(report.id).json", redactor.redact(json).serialized(pretty: true)))
         }
 
         if let note, !note.isEmpty {
@@ -242,6 +249,10 @@ enum DebugTraceBuilder {
     - `breadcrumbs*.jsonl`: feature marks, persisted across launches — the only record of
       what happened before a crash. `session` changes at each launch; `X.begin`/`X.end`
       bracket a feature being in use.
+    - `crashes/<id>.json`: what the OS reported about earlier runs (MetricKit): crashes, hangs,
+      CPU and disk-write exceptions. `report` holds MetricKit's own JSON: call-stack trees of
+      binary UUIDs and offsets, to be symbolicated against that build's dSYM. The crashed
+      build is `report…metaData.appBuildVersion`, which may differ from this trace's build.
     - `note.txt`: what the reporter was investigating.
     - `attachments/`: app-provided files and binary query results.
 

@@ -13,7 +13,7 @@ up in all three. That is the whole design.
 
 | Product | Sources | What |
 |---|---|---|
-| `DebugTrace` | `Sources/DebugTrace` | `DebugLogger` + log buffer (`DebugLogger.swift`), `DebugSurface` registry with `DebugEndpoint`/`DebugParameter`, trace builder and zip, log reader, breadcrumbs, redactor, credential. Links nothing. |
+| `DebugTrace` | `Sources/DebugTrace` | `DebugLogger` + log buffer (`DebugLogger.swift`), `DebugSurface` registry with `DebugEndpoint`/`DebugParameter`, trace builder and zip, log reader, breadcrumbs, `DebugCrashReports` (MetricKit intake), redactor, credential. Links nothing. |
 | `DebugTraceUI` | `Sources/DebugTraceUI` | `DebugTraceView`/`DebugTraceButton`, `DebugApprovalWindow`, `DebugPatchRefresh` (`@PatchRefresh` and friends) |
 | `DebugTraceServer` | `Sources/DebugTraceServer` | HTTP + MCP listener, approval, `_profile` (`DebugProfiler` over the C walker `DebugTraceSampler`), `_screenshot`/`_screen` (`DebugScreenCapture`), patch-runtime loader |
 | `DebugTraceInject` | `Sources/DebugTraceInject` | `_inject` / `_patches`: loads a signed patch dylib. Embedded by `build-and-sign --inject`, never linked by apps. |

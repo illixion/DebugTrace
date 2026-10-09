@@ -24,6 +24,10 @@ public struct DebugTraceConfiguration: Sendable {
     public var logWindowSeconds: Int
     public var maxLogEntries: Int
     public var redactor: DebugRedactor
+    /// Whether to collect the OS's crash, hang and resource-exception
+    /// diagnostics about earlier runs (MetricKit) and, in a build with an
+    /// upload destination, send them to the store on the next launch.
+    public var collectsDiagnostics: Bool
 
     public init(
         subsystems: [String]? = nil,
@@ -32,7 +36,8 @@ public struct DebugTraceConfiguration: Sendable {
         includesSystemLog: Bool? = nil,
         logWindowSeconds: Int = 30 * 60,
         maxLogEntries: Int = 20_000,
-        redactor: DebugRedactor = .standard
+        redactor: DebugRedactor = .standard,
+        collectsDiagnostics: Bool = true
     ) {
         self.subsystems = subsystems ?? [Bundle.main.bundleIdentifier].compactMap { $0 }
         self.privacy = privacy
@@ -41,6 +46,7 @@ public struct DebugTraceConfiguration: Sendable {
         self.logWindowSeconds = logWindowSeconds
         self.maxLogEntries = maxLogEntries
         self.redactor = redactor
+        self.collectsDiagnostics = collectsDiagnostics
     }
 
     var resolvedIncludesSystemLog: Bool { includesSystemLog ?? (privacy == .development) }
@@ -75,6 +81,15 @@ public enum DebugTrace {
         state.withLock { $0.configuration = configuration }
         DebugLogBuffer.shared.mode = configuration.privacy
         DebugLogBuffer.shared.capturesDebug = configuration.capturesDebug ?? (configuration.privacy == .development)
+        if configuration.collectsDiagnostics {
+            DebugCrashReports.shared.start {
+                Task { @MainActor in await DebugTrace.uploadPendingDiagnostics() }
+            }
+            // Reports stored by an earlier launch whose upload did not finish.
+            if !DebugCrashReports.shared.reports(pendingOnly: true).isEmpty {
+                Task { @MainActor in await DebugTrace.uploadPendingDiagnostics() }
+            }
+        }
     }
 
     public static var privacy: DebugPrivacyMode { configuration.privacy }
@@ -134,11 +149,13 @@ public enum DebugTrace {
     public static func capture(
         note: String? = nil,
         surface: DebugSurface = .shared,
-        logWindowSeconds: Int? = nil
+        logWindowSeconds: Int? = nil,
+        diagnostics: [DebugCrashReport]? = nil
     ) async throws -> DebugTraceArchive {
         let archive = try await DebugTraceBuilder.build(
             note: note, surface: surface, configuration: configuration, credential: credential,
-            logWindowSeconds: logWindowSeconds)
+            logWindowSeconds: logWindowSeconds,
+            diagnostics: diagnostics ?? DebugCrashReports.shared.recent())
         recentArchives.append(archive)
         if recentArchives.count > DebugTraceBuilder.keptArchives {
             recentArchives.removeFirst(recentArchives.count - DebugTraceBuilder.keptArchives)
@@ -175,6 +192,39 @@ public enum DebugTrace {
         let body = (try? JSONValue.parse(data)) ?? (data.isEmpty ? nil : .string(String(decoding: data.prefix(2_000), as: UTF8.self)))
         mark("_trace.uploaded", "\(archive.id, privacy: .public) → \(status)")
         return DebugTraceUploadResult(statusCode: status, accepted: (200..<300).contains(status), response: body)
+    }
+}
+
+extension DebugTrace {
+    private static let diagnosticsUploading = OSAllocatedUnfairLock(initialState: false)
+
+    /// Sends the OS diagnostics not yet uploaded as one trace, which also
+    /// carries the breadcrumbs of the run that ended. Does nothing without an
+    /// upload destination. A refusal by the store is final (the same trace
+    /// would be refused again); a network failure retries at the next launch.
+    @MainActor
+    public static func uploadPendingDiagnostics() async {
+        guard canUpload,
+              diagnosticsUploading.withLock({ busy in defer { busy = true }; return !busy }) else { return }
+        defer { diagnosticsUploading.withLock { $0 = false } }
+        let pending = DebugCrashReports.shared.reports(pendingOnly: true)
+        guard !pending.isEmpty else { return }
+        let kinds = Set(pending.flatMap(\.kinds)).sorted().joined(separator: ", ")
+        do {
+            // The log window is short: this launch's own log says nothing about
+            // the run that ended. The lead-up is in the breadcrumbs.
+            let archive = try await capture(
+                note: "Automatic report: \(pending.count) OS diagnostic(s) from an earlier run (\(kinds))",
+                logWindowSeconds: 60, diagnostics: pending)
+            let result = try await upload(archive)
+            if result.accepted {
+                DebugCrashReports.shared.markDone(pending.map(\.id), state: "uploaded")
+            } else if (400..<500).contains(result.statusCode) {
+                DebugCrashReports.shared.markDone(pending.map(\.id), state: "rejected")
+            }
+        } catch {
+            mark("_diagnostics.uploadFailed", "\(String(describing: error), privacy: .public)")
+        }
     }
 }
 
