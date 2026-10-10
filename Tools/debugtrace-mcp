@@ -26,7 +26,8 @@ random nonce and a tag over it under the build's token, so only the key ledger
 (~/.local/state/debugtrace/keys) that holds the token can tell which app it is,
 and the app's identity comes from that ledger record. So an app that is
 already running can be attached to without a relaunch. Bonjour
-reaches the local network only; over Tailscale, use `bas --mcp`.
+finds apps on the local network; each is reached at its tailnet
+name when that answers, since macOS refuses Python LAN connections.
 
 `debugtrace-mcp discover` prints what is found, as JSON (tokens left out),
 for other tools on this Mac such as the appstore page.
@@ -43,6 +44,7 @@ import hmac
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -287,6 +289,28 @@ def recognise(txt, records):
     return ledger_record(txt.get("keyId"))
 
 
+def reachable(host, port, timeout=1.0):
+    """Whether this process can open a TCP connection to host:port."""
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
+def bonjour_url(service, device):
+    """Where to reach an advertised server. Bonjour finds it on the LAN, but
+    macOS Local Network privacy silently refuses LAN connections from Python
+    (Xcode's /usr/bin/python3 and Homebrew's alike: "No route to host"), so
+    the device's tailnet name (its name lowercased, as `bas --mcp` tries
+    first) is tried before the advertised `.local` host. Tailscale traffic
+    isn't subject to that prompt, and WireGuard encrypts the bearer token."""
+    host, port = service["host"], service["port"]
+    if device and reachable(device.lower(), port):
+        host = device.lower()
+    return f"http://{host}:{port}"
+
+
 def discovered_sessions(services=None):
     """Advertised servers as session dicts. `attachable` is false, with a
     reason, when this Mac's ledger has no token for that build."""
@@ -296,15 +320,18 @@ def discovered_sessions(services=None):
     for service in services:
         txt = service["txt"]
         record = recognise(txt, records) or {}
+        device = record.get("device") or service["host"].removesuffix(".local")
         project = os.path.basename(record.get("project") or "")
         session = {
             "appName": txt.get("name") or project or record.get("bundleId") or "An unrecognised app",
             "bundleId": record.get("bundleId") or txt.get("bundleId"),
             "build": record.get("build") or txt.get("build"), "version": txt.get("version"),
             "keyId": record.get("keyId") or txt.get("keyId"),
-            "device": record.get("device") or service["host"].removesuffix(".local"),
-            "url": f"http://{service['host']}:{service['port']}", "startedAt": None, "source": "bonjour",
+            "device": device, "startedAt": None, "source": "bonjour",
         }
+        # Probed only for an app this Mac can attach to: nobody calls the others.
+        session["url"] = (bonjour_url(service, device) if record.get("commandToken")
+                          else f"http://{service['host']}:{service['port']}")
         if record.get("commandToken"):
             session["token"] = record["commandToken"]
             session["attachable"] = True

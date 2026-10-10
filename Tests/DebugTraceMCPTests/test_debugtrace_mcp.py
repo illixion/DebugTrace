@@ -161,11 +161,14 @@ class Discovery(unittest.TestCase):
     def setUp(self):
         import tempfile
         self.keys = tempfile.mkdtemp()
-        self._saved_dir = mcp.KEY_DIR
+        self._saved = (mcp.KEY_DIR, mcp.reachable)
         mcp.KEY_DIR = self.keys
+        # No real network: only the hosts a test lists answer.
+        self.answering = set()
+        mcp.reachable = lambda host, port, timeout=1.0: (host, port) in self.answering
 
     def tearDown(self):
-        mcp.KEY_DIR = self._saved_dir
+        mcp.KEY_DIR, mcp.reachable = self._saved
 
     def ledger(self, key_id, **record):
         with open(os.path.join(self.keys, f"{key_id}.json"), "w") as handle:
@@ -194,6 +197,23 @@ class Discovery(unittest.TestCase):
         self.assertEqual(session["url"], "http://ixPhone.local:8643")
         self.assertEqual(session["device"], "ixPhone")
         self.assertNotIn("token", mcp.describe(session))
+
+    def test_an_attachable_service_is_reached_at_its_tailnet_name_when_that_answers(self):
+        # macOS refuses Python's LAN connections, so the `.local` host is the fallback.
+        self.ledger("k1", device="ixPhone", commandToken="tok")
+        self.answering = {("ixphone", 8643)}
+        session, = mcp.discovered_sessions(mcp.parse_zone(ZONE))
+        self.assertEqual(session["url"], "http://ixphone:8643")
+        self.answering = {("ixphone", 9999)}
+        session, = mcp.discovered_sessions(mcp.parse_zone(ZONE))
+        self.assertEqual(session["url"], "http://ixPhone.local:8643")
+
+    def test_an_unattachable_service_is_not_probed(self):
+        def refuse(*args, **kwargs):
+            raise AssertionError("probed a service nobody can attach to")
+        mcp.reachable = refuse
+        session, = mcp.discovered_sessions(mcp.parse_zone(ZONE))
+        self.assertEqual(session["url"], "http://ixPhone.local:8643")
 
     def test_apps_says_whether_live_patching_is_ready(self):
         launched = mcp.describe({"appName": "A", "injectDir": "/p/build/inject"})

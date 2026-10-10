@@ -31,7 +31,11 @@ TestFlight) never listens: `requested(...)` and `start()` both refuse.
   ledger record whose token makes that tag, and lists the app under that record's identity.
   `txtvers=1` records from older builds, which name their `keyId`, are still recognised.
   `debugtrace-mcp discover` prints the same as JSON (no tokens) for other tools, such as the
-  appstore page. Bonjour is local-network only; over Tailscale, `bas --mcp` records a session.
+  appstore page. Bonjour only finds apps on the local network. An attachable app is then
+  reached at the device's tailnet name (its name lowercased) when that port answers, with the
+  `.local` host as the fallback: macOS Local Network privacy silently refuses LAN connections
+  from Python, Xcode's `/usr/bin/python3` included ("No route to host"), and WireGuard keeps
+  the bearer token off the LAN. Off the local network, `bas --mcp` records a session.
 - **Ports are not identities.** The server takes the first free port in 8642–8691, so several
   apps can serve at once. Discovery and session records carry the port.
 - **Session records** (`bas --mcp`, which implies `--log`) live in
