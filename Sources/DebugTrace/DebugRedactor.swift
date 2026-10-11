@@ -84,6 +84,11 @@ public struct DebugRedactor: Sendable {
     }
 
     public func redact(_ value: JSONValue) -> JSONValue {
+        // Recursive, one frame per level: a deep value is redacted on a stack
+        // with room for it (JSONValueDepth.swift).
+        if !DebugDeepStack.isOnDeepStack, value.isDeep {
+            return DebugDeepStack.run { redact(value) }
+        }
         switch value {
         case .string(let text): return .string(redact(text))
         case .array(let array): return .array(array.map(redact))

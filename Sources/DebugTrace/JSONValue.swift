@@ -106,6 +106,10 @@ extension JSONValue: Codable {
 extension JSONValue {
     /// Keys sorted, so two captures of the same state diff cleanly.
     public func serialized(pretty: Bool = false) -> Data {
+        // Foundation's encoder recurses a dozen frames per level and refuses
+        // 512 levels; a deep value is written without recursion instead
+        // (JSONValueDepth.swift).
+        if isDeep { return Self.writeIteratively(self, pretty: pretty) }
         let encoder = JSONEncoder()
         encoder.outputFormatting = pretty
             ? [.sortedKeys, .withoutEscapingSlashes, .prettyPrinted]
@@ -118,8 +122,11 @@ extension JSONValue {
         String(decoding: serialized(pretty: pretty), as: UTF8.self)
     }
 
+    /// Deeply nested text is read without recursion and without Foundation's
+    /// 512-level limit (JSONValueDepth.swift).
     public static func parse(_ data: Data) throws -> JSONValue {
-        try JSONDecoder().decode(JSONValue.self, from: data)
+        if nesting(of: data) > DebugDeepStack.depthThreshold { return try parseIteratively(data) }
+        return try JSONDecoder().decode(JSONValue.self, from: data)
     }
 }
 

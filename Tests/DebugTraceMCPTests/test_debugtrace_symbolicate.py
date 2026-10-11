@@ -135,5 +135,33 @@ class SymbolicateTests(unittest.TestCase):
         self.assertEqual([f["offsetIntoBinaryTextSegment"] for f in sym.heaviest(root)], [1, 3])
 
 
+    def flat(self, tree, depth=0):
+        """A tree as DebugTrace stores it: depth first, each frame with its depth."""
+        f = {k: v for k, v in tree.items() if k != "subFrames"}
+        f["depth"] = depth
+        return [f] + [x for sub in tree.get("subFrames", []) for x in self.flat(sub, depth + 1)]
+
+    def test_flat_layout_reads_like_the_nested_one(self):
+        self.slot("a", APP, "abc1234")
+        flat = json.loads(json.dumps(NEW))
+        for t in flat["crashDiagnostic"]["callStackTree"]["callStackThreads"]:
+            t["frames"] = [x for root in t.pop("rootFrames") for x in self.flat(root)]
+        self.assertEqual(self.run_report(flat), self.run_report(NEW))
+        legacy = json.loads(json.dumps(LEGACY))
+        for t in legacy["crashDiagnostics"][0]["callStackTree"]["callStacks"]:
+            t["frames"] = self.flat(t.pop("callStackRootFrames"))
+        self.slot("b", APP, "def5678")
+        self.assertIn("fn_0x100000200", self.run_report(legacy))
+
+    def test_flat_hang_follows_the_heaviest_branch(self):
+        root = frame(APP, 1, subs=[dict(frame(APP, 2, subs=[frame(APP, 4)]), sampleCount=1), dict(frame(APP, 3), sampleCount=9)])
+        chains = sym.flat_chains(self.flat(root) + self.flat(frame(APP, 7)))
+        self.assertEqual([[f["offsetIntoBinaryTextSegment"] for f in c] for c in chains], [[1, 3], [7]])
+
+    def test_a_deep_flat_chain_needs_no_recursion(self):
+        frames = [{"binaryUUID": APP, "offsetIntoBinaryTextSegment": i, "depth": i, "sampleCount": 1} for i in range(5000)]
+        self.assertEqual(len(sym.flat_chains(frames)[0]), 5000)
+
+
 if __name__ == "__main__":
     unittest.main()

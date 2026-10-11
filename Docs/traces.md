@@ -43,6 +43,19 @@ Turn it off with `collectsDiagnostics: false`.
   (`source: MXMetricManager`) it is the `MXDiagnosticPayload`: `{crashDiagnostics: [{callStackTree,
   diagnosticMetaData: {appBuildVersion, signal, …}}], timeStampBegin, timeStampEnd}`.
   Either way it is a call-stack tree of binary UUIDs and offsets, not an `.ips`.
+- **Frame trees are stored flat.** MetricKit nests a call stack one level per frame
+  (`subFrames`). A 300-frame crash overflowed a Swift task's 512 KB stack while being
+  encoded, which took Hypnos down mid-film and again on every relaunch while it retried
+  (2026-10-11), and Foundation's coders refuse anything past 512 levels anyway. So every
+  `rootFrames` (27+) or `callStackRootFrames` (older) becomes `frames`: the tree depth
+  first, each frame with its `depth` (0 for a root) and no `subFrames`; a frame's children
+  are the frames after it one level deeper, up to the next frame at its depth or less.
+  The 27+ report is flattened as it is encoded (`JSONValueEncoder` with an intercept, on
+  `DebugDeepStack`), an older payload after parsing, and a report stored nested by an older
+  build when it is next read. The symbolicator reads both layouts. More generally,
+  `JSONValue`'s `serialized`, `parse` and the redactor handle a value of any depth on any
+  thread: past 64 levels they switch to iterative coders or a 64 MB stack
+  (`JSONValueDepth.swift`).
 - **Symbolicating:** `Tools/debugtrace-symbolicate <trace id>` prints the blamed thread (`--all`
   for every thread) with app frames resolved to function and line; Apple's frames stay
   `name +offset`. It reads the appstore's `data/traces/<id>/files/crashes/` and the dSYM archive.

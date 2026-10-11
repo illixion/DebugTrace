@@ -78,7 +78,17 @@ public final class DebugCrashReports: @unchecked Sendable {
                     case .appLaunch: kind = "appLaunch"
                     @unknown default: kind = "unknown"
                     }
-                    guard let json = try? JSONValue(encoding: report) else { continue }
+                    // A crash's call-stack tree nests once per frame: converted on a
+                    // deep stack, with each frame tree flattened as it is encoded,
+                    // so nothing deep is ever stored (see Self.flattened).
+                    let json: JSONValue? = DebugDeepStack.run {
+                        let encoder = JSONValueEncoder()
+                        encoder.intercept = { value in
+                            (value as? ContiguousArray<CallStackFrame>).map(Self.flatFrames)
+                        }
+                        return (try? encoder.encode(report)).map(Self.flattened)
+                    }
+                    guard let json else { continue }
                     self.record(kinds: [kind], report: json, source: "MetricManager")
                 }
             }
@@ -95,6 +105,7 @@ public final class DebugCrashReports: @unchecked Sendable {
 
     func record(kinds: [String], report: JSONValue, source: String) {
         guard let directory else { return }
+        let report = report.isDeep ? DebugDeepStack.run { Self.flattened(report) } : report
         let digest = SHA256.hash(data: report.serialized()).prefix(6).map { String(format: "%02x", $0) }.joined()
         let now = Date()
         let url = directory.appendingPathComponent("\(digest).json")
@@ -114,6 +125,70 @@ public final class DebugCrashReports: @unchecked Sendable {
         DispatchQueue.global(qos: .utility).async { callback?() }
     }
 
+    // MARK: Flat frames
+
+    /// MetricKit nests a call stack one level per frame (`subFrames`), which
+    /// no coder here can take at any real depth: 300 frames overflowed a
+    /// task's stack (Hypnos, 2026-10-11) and 256 hit Foundation's 512-level
+    /// limit. Stored reports carry each tree as a flat list instead: every
+    /// `rootFrames` (27+) or `callStackRootFrames` (older) becomes `frames`,
+    /// the tree's frames in depth-first order, each with its `depth` (0 for a
+    /// root) and without `subFrames`. A frame's children are the frames after
+    /// it one level deeper, up to the next frame at its own depth or less.
+    static func flattened(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .array(let items):
+            return .array(items.map(flattened))
+        case .object(let members):
+            var out: [String: JSONValue] = [:]
+            for (key, member) in members {
+                if key == "rootFrames" || key == "callStackRootFrames" {
+                    let roots: [JSONValue] = member.arrayValue ?? [member]
+                    // Already flat (flattened as MetricKit's report was encoded).
+                    let flat = roots.allSatisfy { $0["depth"] != nil && $0["subFrames"] == nil }
+                    out["frames"] = .array(flat ? roots : flatFrames(roots))
+                } else {
+                    out[key] = flattened(member)
+                }
+            }
+            return .object(out)
+        default:
+            return value
+        }
+    }
+
+    /// Depth-first, without recursion.
+    static func flatFrames(_ roots: [JSONValue]) -> [JSONValue] {
+        var out: [JSONValue] = []
+        var pending: [(JSONValue, Int)] = roots.reversed().map { ($0, 0) }
+        while let (frame, depth) = pending.popLast() {
+            guard var members = frame.objectValue else { continue }
+            let children = members.removeValue(forKey: "subFrames")?.arrayValue ?? []
+            members["depth"] = .int(depth)
+            out.append(.object(members))
+            for child in children.reversed() { pending.append((child, depth + 1)) }
+        }
+        return out
+    }
+
+    #if canImport(MetricKit) && !os(tvOS)
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    static func flatFrames(_ roots: ContiguousArray<CallStackFrame>) -> JSONValue {
+        var out: [JSONValue] = []
+        var pending: [(CallStackFrame, Int)] = roots.reversed().map { ($0, 0) }
+        while let (frame, depth) = pending.popLast() {
+            var members: [String: JSONValue] = ["depth": .int(depth)]
+            if let uuid = frame.binaryUUID { members["binaryUUID"] = .string(uuid.uuidString) }
+            if let address = frame.address { members["address"] = .int(Int(clamping: address)) }
+            if let offset = frame.offsetIntoBinaryTextSegment { members["offsetIntoBinaryTextSegment"] = .int(Int(clamping: offset)) }
+            if let count = frame.sampleCount { members["sampleCount"] = .int(count) }
+            out.append(.object(members))
+            for child in frame.subFrames.reversed() { pending.append((child, depth + 1)) }
+        }
+        return .array(out)
+    }
+    #endif
+
     // MARK: Reading
 
     /// Stored reports, oldest first. `pendingOnly` leaves out those already
@@ -126,8 +201,21 @@ public final class DebugCrashReports: @unchecked Sendable {
         let done = uploadStates(directory)
         var reports: [DebugCrashReport] = []
         for name in names where name.hasSuffix(".json") && name != Self.uploadsFile {
-            guard let data = try? Data(contentsOf: directory.appendingPathComponent(name)),
-                  let envelope = try? JSONValue.parse(data),
+            let url = directory.appendingPathComponent(name)
+            guard var data = try? Data(contentsOf: url) else { continue }
+            // Stored before frames were flattened: flatten it once, on a deep
+            // stack, and keep the flat copy.
+            if JSONValue.nesting(of: data) > DebugDeepStack.depthThreshold {
+                guard let flat = DebugDeepStack.run({ () -> Data? in
+                    guard var deep = try? JSONValue.parse(data) else { return nil }
+                    let flat = Self.flattened(deep).serialized()
+                    JSONValue.dismantle(&deep)
+                    return flat
+                }) else { continue }
+                try? flat.write(to: url, options: .atomic)
+                data = flat
+            }
+            guard let envelope = try? JSONValue.parse(data),
                   let id = envelope["id"]?.stringValue else { continue }
             if pendingOnly, done[id] != nil { continue }
             let received = envelope["receivedAt"]?.stringValue.flatMap { try? Date($0, strategy: .iso8601.year().month().day()
@@ -204,7 +292,13 @@ private final class LegacySubscriber: NSObject, MXMetricManagerSubscriber, @unch
             #if !os(macOS)
             if payload.appLaunchDiagnostics?.isEmpty == false { kinds.append("appLaunch") }
             #endif
-            guard let json = try? JSONValue.parse(payload.jsonRepresentation()) else { continue }
+            let data = payload.jsonRepresentation()
+            guard let json: JSONValue = DebugDeepStack.run({
+                guard var deep = try? JSONValue.parse(data) else { return nil }
+                let flat = DebugCrashReports.flattened(deep)
+                JSONValue.dismantle(&deep)
+                return flat
+            }) else { continue }
             handler(kinds, json)
         }
     }

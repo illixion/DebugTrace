@@ -59,21 +59,49 @@ def heaviest(frame):
     return chain
 
 
+def flat_chains(frames):
+    """Each root's heaviest chain from a flat frame list: DebugTrace stores a tree depth
+    first as `frames`, each frame with its `depth` (0 for a root) and no `subFrames`,
+    because MetricKit's nesting (one level per frame) overflowed the device's stack."""
+    chains, i = [], 0
+    while i < len(frames):
+        if frames[i].get("depth", 0) != 0:
+            i += 1
+            continue
+        chain, j = [frames[i]], i
+        while True:
+            depth = frames[j].get("depth", 0)
+            best, k = None, j + 1
+            while k < len(frames) and frames[k].get("depth", 0) > depth:
+                if frames[k].get("depth", 0) == depth + 1 and (
+                        best is None or frames[k].get("sampleCount", 0) > frames[best].get("sampleCount", 0)):
+                    best = k
+                k += 1
+            if best is None:
+                break
+            chain.append(frames[best])
+            j = best
+        chains.append(chain)
+        i += 1
+    return chains
+
+
 def threads(tree):
     """[(attributed, [frame, ...])] for either layout, each frame {uuid, name, offset}."""
     names = {b["uuid"]: b.get("name", "?") for b in tree.get("binaryInfo", [])}
-    raw = []
-    for t in tree.get("callStackThreads", []):  # 27+
-        for root in t.get("rootFrames", []):
-            raw.append((t.get("threadAttributed", False), root))
-    for t in tree.get("callStacks", []):  # MXCallStackTree before 27
-        root = t.get("callStackRootFrames")
-        if isinstance(root, dict):
-            raw.append((t.get("threadAttributed", False), root))
+    raw = []  # (attributed, chain of frames)
+    for t in tree.get("callStackThreads", []) + tree.get("callStacks", []):  # 27+, then before 27
+        attributed = t.get("threadAttributed", False)
+        if isinstance(t.get("frames"), list):  # flattened by DebugTrace
+            raw += [(attributed, chain) for chain in flat_chains(t["frames"])]
+        roots = t.get("rootFrames", [])
+        legacy = t.get("callStackRootFrames")
+        roots = roots + ([legacy] if isinstance(legacy, dict) else legacy if isinstance(legacy, list) else [])
+        raw += [(attributed, heaviest(root)) for root in roots if isinstance(root, dict)]
     out = []
-    for attributed, root in raw:
+    for attributed, chain in raw:
         frames = [{"uuid": f.get("binaryUUID"), "offset": f.get("offsetIntoBinaryTextSegment", 0),
-                   "name": f.get("binaryName") or names.get(f.get("binaryUUID"), "?")} for f in heaviest(root)]
+                   "name": f.get("binaryName") or names.get(f.get("binaryUUID"), "?")} for f in chain]
         out.append((attributed, frames))
     return out
 
